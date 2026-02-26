@@ -24,6 +24,7 @@ export interface HeartbeatPayload {
   theme?: string;
   active_plugins_count?: number;
   load_avg?: number[];
+  traffic_rps?: number;
   error_counts?: Record<string, number>;
   site_url?: string;
 }
