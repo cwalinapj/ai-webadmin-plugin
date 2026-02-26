@@ -31,8 +31,12 @@ new_sqlite_classes = ["SiteLock"]
 [ai]
 binding = "AI"
 
+[triggers]
+crons = ["17 * * * *"]
+
 [vars]
 REPLAY_WINDOW_SECONDS = "300"
+REPLAY_RETENTION_SECONDS = "86400"
 CAP_TOKEN_HOST_OPTIMIZER_WRITE = "REPLACE_ME"
 ANALYTICS_GOAL_ASSISTANT_USE_AI = "1"
 ANALYTICS_GOAL_ASSISTANT_MODEL = "@cf/meta/llama-3.1-8b-instruct"

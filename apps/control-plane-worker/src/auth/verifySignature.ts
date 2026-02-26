@@ -1,3 +1,5 @@
+import { resolveRoutePolicy, type RouteCapability } from './routePolicy';
+
 export interface SignatureEnv {
   WP_PLUGIN_SHARED_SECRET: string;
   CAP_TOKEN_UPTIME_WRITE: string;
@@ -85,7 +87,12 @@ export async function verifySignedRequest(input: VerifyInput): Promise<VerifiedR
     return { ok: false, status: 401, error: 'missing_plugin_id' };
   }
 
-  const capabilityCheck = verifyCapabilityToken(path, request.headers.get('X-Capability-Token'), env);
+  const routePolicy = resolveRoutePolicy(path);
+  const capabilityCheck = verifyCapabilityToken(
+    routePolicy.capability,
+    request.headers.get('X-Capability-Token'),
+    env,
+  );
   if (!capabilityCheck.ok) {
     return capabilityCheck;
   }
@@ -131,79 +138,59 @@ export async function verifySignedRequest(input: VerifyInput): Promise<VerifiedR
 }
 
 function verifyCapabilityToken(
-  path: string,
+  capability: RouteCapability,
   tokenHeader: string | null,
   env: SignatureEnv,
 ): { ok: true } | VerifyError {
-  if (path === '/plugin/wp/watchdog/heartbeat' || path === '/plugin/site/watchdog/heartbeat') {
-    if (!env.CAP_TOKEN_UPTIME_WRITE) {
-      return { ok: false, status: 500, error: 'worker_missing_capability_token' };
-    }
-    const token = tokenHeader?.trim() ?? '';
-    if (token === '') {
-      return { ok: false, status: 403, error: 'missing_capability_token' };
-    }
-    if (!timingSafeEqual(token, env.CAP_TOKEN_UPTIME_WRITE)) {
-      return { ok: false, status: 403, error: 'invalid_capability_token' };
-    }
+  if (capability === null) {
+    return { ok: true };
   }
 
-  if (path.startsWith('/plugin/wp/analytics/')) {
-    if (!env.CAP_TOKEN_ANALYTICS_WRITE) {
-      return { ok: false, status: 500, error: 'worker_missing_analytics_capability_token' };
-    }
-    const token = tokenHeader?.trim() ?? '';
-    if (token === '') {
-      return { ok: false, status: 403, error: 'missing_capability_token' };
-    }
-    if (!timingSafeEqual(token, env.CAP_TOKEN_ANALYTICS_WRITE)) {
-      return { ok: false, status: 403, error: 'invalid_capability_token' };
-    }
+  const expectedTokenResult = resolveCapabilityToken(capability, env);
+  if (!expectedTokenResult.ok) {
+    return expectedTokenResult;
   }
 
-  if (path.startsWith('/plugin/wp/sandbox/')) {
-    if (!env.CAP_TOKEN_SANDBOX_WRITE) {
-      return { ok: false, status: 500, error: 'worker_missing_sandbox_capability_token' };
-    }
-    const token = tokenHeader?.trim() ?? '';
-    if (token === '') {
-      return { ok: false, status: 403, error: 'missing_capability_token' };
-    }
-    if (!timingSafeEqual(token, env.CAP_TOKEN_SANDBOX_WRITE)) {
-      return { ok: false, status: 403, error: 'invalid_capability_token' };
-    }
+  const token = tokenHeader?.trim() ?? '';
+  if (token === '') {
+    return { ok: false, status: 403, error: 'missing_capability_token' };
   }
-
-  if (
-    path === '/plugin/wp/host-optimizer/baseline' ||
-    path === '/plugin/site/host-optimizer/baseline'
-  ) {
-    if (!env.CAP_TOKEN_HOST_OPTIMIZER_WRITE) {
-      return { ok: false, status: 500, error: 'worker_missing_host_optimizer_capability_token' };
-    }
-    const token = tokenHeader?.trim() ?? '';
-    if (token === '') {
-      return { ok: false, status: 403, error: 'missing_capability_token' };
-    }
-    if (!timingSafeEqual(token, env.CAP_TOKEN_HOST_OPTIMIZER_WRITE)) {
-      return { ok: false, status: 403, error: 'invalid_capability_token' };
-    }
-  }
-
-  if (path.startsWith('/plugin/wp/analytics/') || path.startsWith('/plugin/site/analytics/')) {
-    if (!env.CAP_TOKEN_ANALYTICS_WRITE) {
-      return { ok: false, status: 500, error: 'worker_missing_analytics_capability_token' };
-    }
-    const token = tokenHeader?.trim() ?? '';
-    if (token === '') {
-      return { ok: false, status: 403, error: 'missing_capability_token' };
-    }
-    if (!timingSafeEqual(token, env.CAP_TOKEN_ANALYTICS_WRITE)) {
-      return { ok: false, status: 403, error: 'invalid_capability_token' };
-    }
+  if (!timingSafeEqual(token, expectedTokenResult.token)) {
+    return { ok: false, status: 403, error: 'invalid_capability_token' };
   }
 
   return { ok: true };
+}
+
+function resolveCapabilityToken(
+  capability: Exclude<RouteCapability, null>,
+  env: SignatureEnv,
+): { ok: true; token: string } | VerifyError {
+  if (capability === 'uptime') {
+    if (!env.CAP_TOKEN_UPTIME_WRITE) {
+      return { ok: false, status: 500, error: 'worker_missing_capability_token' };
+    }
+    return { ok: true, token: env.CAP_TOKEN_UPTIME_WRITE };
+  }
+
+  if (capability === 'analytics') {
+    if (!env.CAP_TOKEN_ANALYTICS_WRITE) {
+      return { ok: false, status: 500, error: 'worker_missing_analytics_capability_token' };
+    }
+    return { ok: true, token: env.CAP_TOKEN_ANALYTICS_WRITE };
+  }
+
+  if (capability === 'sandbox') {
+    if (!env.CAP_TOKEN_SANDBOX_WRITE) {
+      return { ok: false, status: 500, error: 'worker_missing_sandbox_capability_token' };
+    }
+    return { ok: true, token: env.CAP_TOKEN_SANDBOX_WRITE };
+  }
+
+  if (!env.CAP_TOKEN_HOST_OPTIMIZER_WRITE) {
+    return { ok: false, status: 500, error: 'worker_missing_host_optimizer_capability_token' };
+  }
+  return { ok: true, token: env.CAP_TOKEN_HOST_OPTIMIZER_WRITE };
 }
 
 function timingSafeEqual(left: string, right: string): boolean {
