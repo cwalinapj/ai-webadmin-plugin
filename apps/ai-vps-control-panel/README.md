@@ -8,6 +8,7 @@ Initial backend scaffold for a custom VPS control panel operated through a chat-
 - Safe command executor with allowlisted services and confirmation gating.
 - Dry-run-first execution mode for risky operations.
 - Persistent API-key/PAT management with hashed-at-rest secrets, audit trails, revoke/rotate endpoints, and auto-rotation support.
+- Supports `switch_load_balancer_mode` action mapped to `/root/watchdog-heartbeat.sh` with strict args validation.
 
 ## API routes
 - `GET /health`
@@ -15,6 +16,7 @@ Initial backend scaffold for a custom VPS control panel operated through a chat-
 - `GET /api/tokens`
 - `POST /api/tokens`
 - `POST /api/tokens/auto-rotate`
+- `POST /api/tokens/publish-audit`
 - `POST /api/tokens/:id/revoke`
 - `POST /api/tokens/:id/rotate`
 - `GET /api/sites`
@@ -44,7 +46,14 @@ export AI_VPS_API_KEYS="admin-a:admin:tenant-a,operator-a:operator:tenant-a"
   - auth-triggered rotation returns the replacement via `x-rotated-api-key` response header.
   - batch rotation is available at `POST /api/tokens/auto-rotate`.
 - Environment keys (`AI_VPS_API_KEYS`) are still supported as bootstrap keys.
-- Current vault model: no external Vault service is hosted by default; hashed tokens are stored in the panel DB. Add HashiCorp Vault/KMS later if you want external secret custody.
+- Secret backend options:
+  - `AI_VPS_SECRET_BACKEND=local` (default): SHA-256 hash with `AI_VPS_TOKEN_PEPPER`.
+  - `AI_VPS_SECRET_BACKEND=vault`: HashiCorp Vault Transit HMAC backend.
+- Vault mode env vars:
+  - `AI_VPS_VAULT_ADDR` (e.g. `http://127.0.0.1:8200`)
+  - `AI_VPS_VAULT_TOKEN`
+  - `AI_VPS_VAULT_TRANSIT_PATH` (default `transit`)
+  - `AI_VPS_VAULT_HMAC_KEY` (default `ai-vps-token-hmac`)
 
 ## Worker telemetry sync
 - When an action executes successfully, the panel syncs telemetry/jobs to the control-plane worker using `panel-addon-core`.
@@ -63,6 +72,7 @@ cd apps/ai-vps-control-panel
 npm install
 export AI_VPS_DB_PATH="./data/ai-vps-control-panel.sqlite"
 export AI_VPS_API_KEYS="admin-a:admin:tenant-a,operator-a:operator:tenant-a"
+export AI_VPS_SECRET_BACKEND="local"
 export AI_VPS_TOKEN_PEPPER="change-this-in-prod"
 export AI_VPS_TOKEN_ROTATE_DAYS="30"
 npm test
@@ -70,6 +80,15 @@ npm run build
 npm start
 ```
 Open [http://localhost:8080](http://localhost:8080) for the web UI.
+
+### Optional: Vault transit backend
+```bash
+export AI_VPS_SECRET_BACKEND="vault"
+export AI_VPS_VAULT_ADDR="http://127.0.0.1:8200"
+export AI_VPS_VAULT_TOKEN="..."
+export AI_VPS_VAULT_TRANSIT_PATH="transit"
+export AI_VPS_VAULT_HMAC_KEY="ai-vps-token-hmac"
+```
 
 ## Example flow
 1. Register site:
@@ -115,4 +134,5 @@ curl -sS -X POST http://localhost:8080/api/tokens/<token_id>/rotate \
 
 ## Notes
 - This is the first control-plane backend skeleton, not a full cPanel replacement yet.
-- Next phase should add full dashboard UX polish, external vault integration option, and production database migrations.
+- Next phase should add full dashboard UX polish and production database migrations.
+- For watchdog automation, ensure `/root/watchdog-heartbeat.sh` exists and is executable on the VPS host.

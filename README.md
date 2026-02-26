@@ -75,6 +75,27 @@ npm install
 npm run dev
 ```
 
+### Autonomous Watchdog LB (Worker -> VPS panel)
+
+Enable automatic LB switching when heartbeat telemetry crosses thresholds:
+
+```bash
+cd apps/control-plane-worker
+wrangler secret put WATCHDOG_AUTOMATION_PANEL_API_TOKEN
+```
+
+Set vars in `apps/control-plane-worker/wrangler.toml`:
+- `WATCHDOG_AUTOMATION_ENABLED=1`
+- `WATCHDOG_AUTOMATION_PANEL_BASE_URL=https://<vps-panel-host>`
+- `WATCHDOG_AUTOMATION_BACKENDS=127.0.0.1:18120,127.0.0.1:18122`
+- `WATCHDOG_AUTOMATION_ENABLE_RPS_THRESHOLD=180`
+- `WATCHDOG_AUTOMATION_DISABLE_RPS_THRESHOLD=120`
+- `WATCHDOG_AUTOMATION_RPS_PER_LOAD_AVG=60` (fallback if `traffic_rps` not provided)
+- `WATCHDOG_AUTOMATION_COOLDOWN_SECONDS=300`
+- `WATCHDOG_AUTOMATION_DRY_RUN=1` (set `0` for live execution)
+- `WATCHDOG_AUTOMATION_SITE_TEMPLATE={domain}`
+- `WATCHDOG_AUTOMATION_SITE_CONFIG_TEMPLATE=/etc/nginx/sites-available/{domain}.conf`
+
 ### Panel Addon Core
 
 ```bash
@@ -91,6 +112,9 @@ cd apps/ai-vps-control-panel
 npm install
 export AI_VPS_DB_PATH="./data/ai-vps-control-panel.sqlite"
 export AI_VPS_API_KEYS="admin-a:admin:tenant-a,operator-a:operator:tenant-a"
+export AI_VPS_SECRET_BACKEND="local"
+export AI_VPS_TOKEN_PEPPER="change-this-in-prod"
+export AI_VPS_TOKEN_ROTATE_DAYS="30"
 npm test
 npm run build
 npm start
@@ -106,10 +130,16 @@ wrangler secret put GOOGLE_CLIENT_ID
 wrangler secret put GOOGLE_CLIENT_SECRET
 wrangler secret put GOOGLE_OAUTH_REDIRECT_URI
 wrangler secret put CAP_TOKEN_ANALYTICS_WRITE
+wrangler secret put ANALYTICS_GOAL_ASSISTANT_GATEWAY_ID # optional
 ```
 
 Worker callback:
 - `GET /oauth/google/callback`
+- AI planner uses Workers AI binding `AI` with fallback to deterministic planning.
+- Optional vars in `wrangler.toml`:
+  - `ANALYTICS_GOAL_ASSISTANT_USE_AI` (`1` or `0`)
+  - `ANALYTICS_GOAL_ASSISTANT_MODEL` (default `@cf/meta/llama-3.1-8b-instruct`)
+  - `ANALYTICS_GOAL_ASSISTANT_GATEWAY_ID` (optional AI Gateway id)
 
 WP Admin flow:
 1. Open `WebAdmin Edge Agent -> Analytics & Reporting`.

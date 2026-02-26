@@ -2,7 +2,9 @@ import { verifyLegacySignedRequest } from './auth/verifyLegacySignature';
 import { consumeIdempotencyKey, consumeNonce } from './auth/replay';
 import { verifySignedRequest } from './auth/verifySignature';
 import { verifyWalletChallenge, type WalletVerifyPayload } from './auth/verifyWallet';
-import { buildGoalAssistantPlan, type GoalAssistantPayload } from './analytics/buildGoalAssistant';
+import { type GoalAssistantPayload } from './analytics/buildGoalAssistant';
+import { buildGoalAssistantPlanWithAI } from './analytics/buildGoalAssistantWithAI';
+import { runWatchdogLbAutomation, type WatchdogLbAutomationResult } from './automation/watchdogLbAutomation';
 import { withSiteLock } from './durable/withSiteLock';
 import { createHostOptimizerBaseline } from './hostOptimizer/store';
 import { createJob } from './jobs/createJob';
@@ -160,6 +162,7 @@ async function handleHeartbeat(request: Request, env: Env, path: string): Promis
   }
 
   const payload = payloadResult.payload;
+  let automation: WatchdogLbAutomationResult | null = null;
   try {
     await withSiteLock(env.SITE_LOCK, payload.site_id, async () => {
       await upsertSite(env.DB, payload);
@@ -175,6 +178,11 @@ async function handleHeartbeat(request: Request, env: Env, path: string): Promis
 
         await enqueueJob(env.JOB_QUEUE, job);
       }
+
+      automation = await runWatchdogLbAutomation(env, {
+        pluginId: authResult.pluginId,
+        payload,
+      });
     });
   } catch (error) {
     if (error instanceof Error && error.message === 'site_lock_acquire_failed') {
@@ -183,7 +191,7 @@ async function handleHeartbeat(request: Request, env: Env, path: string): Promis
     return json({ ok: false, error: 'internal_error' }, 500);
   }
 
-  return json({ ok: true, commands: [{ type: 'noop' }] }, 200);
+  return json({ ok: true, commands: [{ type: 'noop' }], automation }, 200);
 }
 
 async function handleWalletVerify(request: Request, env: Env): Promise<Response> {
@@ -292,12 +300,13 @@ async function handleGoalAssistant(request: Request, env: Env, path: string): Pr
     return json({ ok: false, error: payloadResult.error }, 400);
   }
 
-  const plan = buildGoalAssistantPlan(payloadResult.payload);
+  const plannerResult = await buildGoalAssistantPlanWithAI(payloadResult.payload, env);
 
   return json(
     {
       ok: true,
-      plan,
+      plan: plannerResult.plan,
+      planner: plannerResult.planner,
       commands: [{ type: 'noop' }],
     },
     200,
@@ -697,6 +706,7 @@ function parseHeartbeatPayload(
       load_avg: Array.isArray(payload.load_avg)
         ? payload.load_avg.map((item) => Number(item)).filter((item) => Number.isFinite(item))
         : [],
+      traffic_rps: optionalFiniteNumber(payload.traffic_rps),
       error_counts:
         payload.error_counts && typeof payload.error_counts === 'object'
           ? Object.fromEntries(
@@ -1364,6 +1374,19 @@ function numberOrDefault(value: unknown, fallback: number): number {
     return Number.isFinite(parsed) ? parsed : fallback;
   }
   return fallback;
+}
+
+function optionalFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
 }
 
 function json(payload: unknown, status = 200): Response {
