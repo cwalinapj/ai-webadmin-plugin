@@ -76,27 +76,17 @@ function makeRequest(
   });
 }
 
-function base64(text: string): string {
-  return btoa(text);
-}
-
-const VALID_STORE_BODY = {
-  object_key: 'test/key.json',
-  content_base64: base64('{"hello":"world"}'),
-  content_type: 'application/json',
-};
-
-const MOCK_OBJECT_RECORD = {
+const SAMPLE_OBJECT_RECORD: AnchorObjectRecord = {
   id: 'obj-1',
-  object_key: 'test/key.json',
-  content_type: 'application/json',
-  size_bytes: 16,
+  object_key: 'file.txt',
+  content_type: 'application/octet-stream',
+  size_bytes: 5,
   sha256: 'abc123',
-  priority: 'standard' as const,
-  retention_class: 'balanced' as const,
-  primary_provider: 'r2' as const,
-  status: 'stored_primary',
-  r2_key: 'test/key.json',
+  priority: 'standard',
+  retention_class: 'balanced',
+  primary_provider: 'r2',
+  status: 'ready',
+  r2_key: 'file.txt',
   b2_file_name: null,
   ipfs_cid: null,
   ipfs_gateway_url: null,
