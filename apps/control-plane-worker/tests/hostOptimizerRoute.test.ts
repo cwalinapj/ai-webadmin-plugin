@@ -132,6 +132,9 @@ describe('host optimizer route', () => {
       CAP_TOKEN_SANDBOX_WRITE: 'cap-sandbox',
       CAP_TOKEN_HOST_OPTIMIZER_WRITE: 'cap-host',
       REPLAY_WINDOW_SECONDS: '300',
+      GOOGLE_CLIENT_ID: 'test-client-id',
+      GOOGLE_CLIENT_SECRET: 'test-client-secret',
+      GOOGLE_OAUTH_REDIRECT_URI: 'http://localhost/oauth/callback',
     });
     const body = (await response.json()) as Record<string, unknown>;
 
@@ -162,6 +165,9 @@ describe('host optimizer route', () => {
       CAP_TOKEN_SANDBOX_WRITE: 'cap-sandbox',
       CAP_TOKEN_HOST_OPTIMIZER_WRITE: 'cap-host',
       REPLAY_WINDOW_SECONDS: '300',
+      GOOGLE_CLIENT_ID: 'test-client-id',
+      GOOGLE_CLIENT_SECRET: 'test-client-secret',
+      GOOGLE_OAUTH_REDIRECT_URI: 'http://localhost/oauth/callback',
     });
     const body = (await response.json()) as Record<string, unknown>;
 
@@ -202,6 +208,9 @@ describe('host optimizer route', () => {
       CAP_TOKEN_SANDBOX_WRITE: 'cap-sandbox',
       CAP_TOKEN_HOST_OPTIMIZER_WRITE: 'cap-host',
       REPLAY_WINDOW_SECONDS: '300',
+      GOOGLE_CLIENT_ID: 'test-client-id',
+      GOOGLE_CLIENT_SECRET: 'test-client-secret',
+      GOOGLE_OAUTH_REDIRECT_URI: 'http://localhost/oauth/callback',
     });
     const body = (await response.json()) as Record<string, unknown>;
 
