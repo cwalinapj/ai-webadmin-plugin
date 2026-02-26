@@ -100,16 +100,27 @@ class Client
         $status = (int)wp_remote_retrieve_response_code($response);
         $rawBody = (string)wp_remote_retrieve_body($response);
         $decoded = json_decode($rawBody, true);
+        $decodedBody = is_array($decoded) ? $decoded : ['raw' => $rawBody];
+        $responseOk = $status >= 200 && $status < 300;
+        $error = '';
+        if (
+            !$responseOk &&
+            isset($decodedBody['error']) &&
+            is_scalar($decodedBody['error'])
+        ) {
+            $error = sanitize_text_field((string)$decodedBody['error']);
+        }
 
-        $this->logger->log($status >= 200 && $status < 300 ? 'info' : 'error', 'Worker request completed', [
+        $this->logger->log($responseOk ? 'info' : 'error', 'Worker request completed', [
             'path' => $normalizedPath,
             'status' => (string)$status,
         ]);
 
         return [
-            'ok' => $status >= 200 && $status < 300,
+            'ok' => $responseOk,
             'status' => $status,
-            'body' => is_array($decoded) ? $decoded : ['raw' => $rawBody],
+            'error' => $error,
+            'body' => $decodedBody,
         ];
     }
 }

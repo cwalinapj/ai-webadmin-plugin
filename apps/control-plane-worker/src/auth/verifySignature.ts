@@ -148,7 +148,20 @@ function verifyCapabilityToken(
     }
   }
 
-  if (path.startsWith('/plugin/wp/sandbox/') || path.startsWith('/plugin/site/sandbox/')) {
+  if (path.startsWith('/plugin/wp/analytics/')) {
+    if (!env.CAP_TOKEN_ANALYTICS_WRITE) {
+      return { ok: false, status: 500, error: 'worker_missing_analytics_capability_token' };
+    }
+    const token = tokenHeader?.trim() ?? '';
+    if (token === '') {
+      return { ok: false, status: 403, error: 'missing_capability_token' };
+    }
+    if (!timingSafeEqual(token, env.CAP_TOKEN_ANALYTICS_WRITE)) {
+      return { ok: false, status: 403, error: 'invalid_capability_token' };
+    }
+  }
+
+  if (path.startsWith('/plugin/wp/sandbox/')) {
     if (!env.CAP_TOKEN_SANDBOX_WRITE) {
       return { ok: false, status: 500, error: 'worker_missing_sandbox_capability_token' };
     }
