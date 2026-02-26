@@ -17,3 +17,4 @@ apps/webadmin-edge-agent/vendor/
 
 # WP-Env runtime
 .wp-env/
+apps/storage-anchor-worker/package-lock.json

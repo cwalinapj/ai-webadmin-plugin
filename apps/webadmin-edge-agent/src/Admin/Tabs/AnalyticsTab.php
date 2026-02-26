@@ -21,9 +21,89 @@ class AnalyticsTab
         $googleDeployStatus = (string)($context['google_last_deploy_status'] ?? 'never');
         $googleDeployMessage = (string)($context['google_last_deploy_message'] ?? '');
         $googleDeployJson = (string)($context['google_last_deploy_json'] ?? '');
+        $generatedAnalyticsApiKey = (string)($context['generated_analytics_api_key'] ?? '');
+        $goalPlanStatus = (string)($settings['analytics_goal_last_plan_status'] ?? 'never');
+        $goalPlanMessage = (string)($settings['analytics_goal_last_plan_message'] ?? '');
+        $goalPlanJson = (string)($settings['analytics_goal_last_plan_json'] ?? '');
+        $goalPlanAt = (int)($settings['analytics_goal_last_plan_at'] ?? 0);
         ?>
         <h2>Analytics &amp; Reporting</h2>
         <p>Connect GA4 + GTM once, then deploy event pathways and conversions in one click.</p>
+
+        <h3>Quick Setup (Single API Key)</h3>
+        <ol>
+          <li>Generate an Analytics API key here in WP Admin.</li>
+          <li>Set the same value in Worker secret <code>CAP_TOKEN_ANALYTICS_WRITE</code>.</li>
+          <li>Click Connect Google, then Deploy GTM + GA4 Conversions.</li>
+        </ol>
+        <p class="description">Google OAuth client ID/secret and callback URL still live on the Worker side for security.</p>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-bottom:12px;">
+          <?php wp_nonce_field('webadmin_edge_agent_generate_analytics_api_key', 'webadmin_edge_agent_generate_analytics_api_key_nonce'); ?>
+          <input type="hidden" name="action" value="webadmin_edge_agent_generate_analytics_api_key" />
+          <button type="submit" class="button">Generate Analytics API Key</button>
+        </form>
+        <?php if ($generatedAnalyticsApiKey !== '') : ?>
+          <p><strong>New Analytics API Key (shown once):</strong></p>
+          <input class="regular-text code" type="text" readonly value="<?php echo esc_attr($generatedAnalyticsApiKey); ?>" onclick="this.select();" />
+        <?php endif; ?>
+
+        <h3>AI Goal Assistant</h3>
+        <p>Describe the business and objective. The agent suggests conversion goals, events, and KPI targets.</p>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+          <?php wp_nonce_field('webadmin_edge_agent_generate_goal_plan', 'webadmin_edge_agent_goal_plan_nonce'); ?>
+          <input type="hidden" name="action" value="webadmin_edge_agent_generate_goal_plan" />
+          <table class="form-table" role="presentation">
+            <tr>
+              <th scope="row"><label for="analytics_goal_business_type">Business Type</label></th>
+              <td><input class="regular-text" id="analytics_goal_business_type" name="analytics_goal_business_type" type="text" placeholder="Dental clinic, home services, SaaS, e-commerce" value="<?php echo esc_attr((string)$settings['analytics_goal_business_type']); ?>" /></td>
+            </tr>
+            <tr>
+              <th scope="row"><label for="analytics_goal_objective">Primary Objective</label></th>
+              <td><input class="regular-text" id="analytics_goal_objective" name="analytics_goal_objective" type="text" placeholder="Increase booked appointments by 20%" value="<?php echo esc_attr((string)$settings['analytics_goal_objective']); ?>" /></td>
+            </tr>
+            <tr>
+              <th scope="row"><label for="analytics_goal_channels">Main Traffic Channels</label></th>
+              <td>
+                <textarea class="large-text" rows="3" id="analytics_goal_channels" name="analytics_goal_channels" placeholder="google_ads&#10;seo&#10;social"><?php echo esc_textarea((string)$settings['analytics_goal_channels']); ?></textarea>
+                <p class="description">One per line.</p>
+              </td>
+            </tr>
+            <tr>
+              <th scope="row"><label for="analytics_goal_form_types">Lead Actions</label></th>
+              <td>
+                <textarea class="large-text" rows="3" id="analytics_goal_form_types" name="analytics_goal_form_types" placeholder="contact_form&#10;book_now&#10;phone_call_click"><?php echo esc_textarea((string)$settings['analytics_goal_form_types']); ?></textarea>
+                <p class="description">One per line.</p>
+              </td>
+            </tr>
+            <tr>
+              <th scope="row"><label for="analytics_goal_avg_value">Average Lead Value</label></th>
+              <td><input class="small-text" id="analytics_goal_avg_value" name="analytics_goal_avg_value" type="number" step="0.01" min="0" value="<?php echo esc_attr((string)$settings['analytics_goal_avg_value']); ?>" /></td>
+            </tr>
+          </table>
+          <p><button type="submit" class="button">Generate Goal Plan</button></p>
+        </form>
+        <p>
+          Last goal plan status: <?php echo esc_html($goalPlanStatus); ?>
+          <?php if ($goalPlanAt > 0) : ?>
+            at <?php echo esc_html(gmdate('Y-m-d H:i:s', $goalPlanAt) . ' UTC'); ?>
+          <?php endif; ?>
+        </p>
+        <?php if ($goalPlanMessage !== '') : ?>
+          <p><?php echo esc_html($goalPlanMessage); ?></p>
+        <?php endif; ?>
+        <?php if ($goalPlanJson !== '') : ?>
+          <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin: 8px 0 12px;">
+            <?php wp_nonce_field('webadmin_edge_agent_apply_goal_plan', 'webadmin_edge_agent_apply_goal_plan_nonce'); ?>
+            <input type="hidden" name="action" value="webadmin_edge_agent_apply_goal_plan" />
+            <button type="submit" class="button button-primary">Apply Plan to Analytics Settings</button>
+          </form>
+        <?php endif; ?>
+        <?php if ($goalPlanJson !== '') : ?>
+          <details>
+            <summary>Goal plan JSON</summary>
+            <pre style="max-height:280px; overflow:auto;"><?php echo esc_html($goalPlanJson); ?></pre>
+          </details>
+        <?php endif; ?>
 
         <h3>Google Connection</h3>
         <p>
@@ -77,7 +157,7 @@ class AnalyticsTab
               <td><input class="regular-text" id="gsc_property_url" name="gsc_property_url" type="url" placeholder="https://example.com/" value="<?php echo esc_attr((string)$settings['gsc_property_url']); ?>" /></td>
             </tr>
             <tr>
-              <th scope="row"><label for="capability_token_analytics">Analytics Capability Token</label></th>
+              <th scope="row"><label for="capability_token_analytics">Analytics API Key</label></th>
               <td>
                 <input class="regular-text" id="capability_token_analytics" name="capability_token_analytics" type="password" autocomplete="new-password" />
                 <p class="description"><?php echo !empty($context['capability_token_analytics_configured']) ? esc_html('Configured. Enter a new value only to rotate.') : esc_html('Not configured yet.'); ?></p>

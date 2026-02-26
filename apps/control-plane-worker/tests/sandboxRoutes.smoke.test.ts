@@ -469,6 +469,24 @@ describe('sandbox routes smoke', () => {
     expect(listResolvedBody.conflicts[0]?.status).toBe('resolved');
     expect(listResolvedBody.conflicts[0]?.resolved_by_agent).toBe('agent-lead');
   });
+
+  it('accepts site route alias for sandbox request endpoint', async () => {
+    const response = await post('/plugin/site/sandbox/request', {
+      site_id: 'site-alias-1',
+      requested_by_agent: 'agent-alias',
+      task_type: 'scan',
+      priority_base: 1,
+      estimated_minutes: 5,
+    });
+    const body = (await response.json()) as {
+      ok: boolean;
+      request?: { id: string; site_id: string };
+    };
+
+    expect(response.status).toBe(201);
+    expect(body.ok).toBe(true);
+    expect(body.request?.site_id).toBe('site-alias-1');
+  });
 });
 
 async function post(path: string, payload: Record<string, unknown>): Promise<Response> {

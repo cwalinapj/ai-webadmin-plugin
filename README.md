@@ -5,6 +5,9 @@ Repository for multiple WordPress plugins and a Cloudflare control plane.
 This repo is now organized as a multi-product suite (not web3-only):
 - `apps/webadmin-edge-agent`: production WordPress edge agent plugin.
 - `apps/control-plane-worker`: Cloudflare Worker control plane.
+- `apps/storage-anchor-worker`: policy-based R2 + B2 + IPFS storage anchor service.
+- `apps/panel-addon-core`: scaffold for non-WordPress control-panel addons.
+- `apps/ai-vps-control-panel`: AI-chat-operated VPS control-panel backend scaffold.
 - `plugins/ai-webadmin`: legacy all-in-one AI WebAdmin plugin.
 - [`plugins/tolldns`](plugins/tolldns/README.md): TollDNS helper plugin — part of the [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-) platform.
 - [`plugins/toll-comments`](plugins/toll-comments/README.md): DDNS Toll Comments — refundable credit-based comment spam protection (merged from [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-)).
@@ -17,6 +20,9 @@ repo/
   apps/
     webadmin-edge-agent/
     control-plane-worker/
+    storage-anchor-worker/
+    panel-addon-core/
+    ai-vps-control-panel/
   plugins/
     ai-webadmin/
     tolldns/
@@ -26,6 +32,14 @@ repo/
   scripts/
   update-feed/
 ```
+
+## VPS addon phase
+
+- Roadmap: `docs/vps-control-panel-addon-roadmap.md`
+- AI VPS control panel architecture: `docs/ai-vps-control-panel-architecture.md`
+- Worker now supports both route namespaces:
+  - `/plugin/wp/*` for existing WordPress agents
+  - `/plugin/site/*` for control-panel addons and non-WordPress runtimes
 
 ## Local development
 
@@ -61,10 +75,24 @@ wrangler secret put GOOGLE_CLIENT_ID
 wrangler secret put GOOGLE_CLIENT_SECRET
 wrangler secret put GOOGLE_OAUTH_REDIRECT_URI
 wrangler secret put CAP_TOKEN_ANALYTICS_WRITE
+wrangler secret put ANALYTICS_GOAL_ASSISTANT_GATEWAY_ID # optional
 ```
 
-OAuth callback route:
+Worker callback:
 - `GET /oauth/google/callback`
+- AI planner uses Workers AI binding `AI` with fallback to deterministic planning.
+- Optional vars in `wrangler.toml`:
+  - `ANALYTICS_GOAL_ASSISTANT_USE_AI` (`1` or `0`)
+  - `ANALYTICS_GOAL_ASSISTANT_MODEL` (default `@cf/meta/llama-3.1-8b-instruct`)
+  - `ANALYTICS_GOAL_ASSISTANT_GATEWAY_ID` (optional AI Gateway id)
+
+WP Admin flow:
+1. Open `WebAdmin Edge Agent -> Analytics & Reporting`.
+2. Click `Generate Analytics API Key` and copy the one-time value.
+3. Set the same value in worker secret `CAP_TOKEN_ANALYTICS_WRITE`.
+4. Use `AI Goal Assistant` to generate recommended conversion goals/events.
+5. Click `Apply Plan to Analytics Settings` to auto-fill primary/secondary conversions + funnel steps.
+6. Save GA4/GTM IDs, click `Connect Google Account`, then `Deploy GTM + GA4 Conversions`.
 
 ## Wallet login verification
 
@@ -150,7 +178,7 @@ Artifact:
 GitHub Actions workflow:
 - Runs worker tests (including Ethereum/Solana wallet-login verification path).
 - Runs WordPress edge-agent PHPUnit suite.
-- Runs PHP lint for `plugins/ai-webadmin`, `plugins/tolldns`, `plugins/toll-comments`, and `plugins/wp-optin`.
+- Runs PHP lint for `plugins/ai-webadmin`, `plugins/tolldns`, `plugins/toll-comments`, `plugins/wp-optin`, and `plugins/ai-addwords-meta-plugin`.
 
 ## GitHub repo rename
 

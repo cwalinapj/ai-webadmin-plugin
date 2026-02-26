@@ -10,6 +10,7 @@ const env = {
   WP_PLUGIN_SHARED_SECRET: 'super-secret-value',
   CAP_TOKEN_UPTIME_WRITE: 'cap-uptime-token',
   CAP_TOKEN_ANALYTICS_WRITE: 'cap-analytics-token',
+  CAP_TOKEN_HOST_OPTIMIZER_WRITE: 'cap-host-token',
   REPLAY_WINDOW_SECONDS: '300',
 };
 

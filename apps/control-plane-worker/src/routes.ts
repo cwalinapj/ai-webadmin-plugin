@@ -2,21 +2,11 @@ import { verifyLegacySignedRequest } from './auth/verifyLegacySignature';
 import { consumeIdempotencyKey, consumeNonce } from './auth/replay';
 import { verifySignedRequest } from './auth/verifySignature';
 import { verifyWalletChallenge, type WalletVerifyPayload } from './auth/verifyWallet';
+import { type GoalAssistantPayload } from './analytics/buildGoalAssistant';
+import { buildGoalAssistantPlanWithAI } from './analytics/buildGoalAssistantWithAI';
+import { runWatchdogLbAutomation, type WatchdogLbAutomationResult } from './automation/watchdogLbAutomation';
 import { withSiteLock } from './durable/withSiteLock';
-import { ensureGa4Conversions } from './google/ga4';
-import { deployGtm } from './google/gtm';
-import {
-  buildGoogleAuthUrl,
-  createOauthSession,
-  exchangeCodeForTokens,
-  getGoogleToken,
-  getGoogleUserEmail,
-  getOauthSession,
-  refreshGoogleAccessToken,
-  saveRefreshedAccessToken,
-  updateOauthSession,
-  upsertGoogleToken,
-} from './google/oauth';
+import { createHostOptimizerBaseline } from './hostOptimizer/store';
 import { createJob } from './jobs/createJob';
 import { heartbeatRiskScore, shouldCreateHeartbeatJob } from './policy/heartbeat';
 import { enqueueJob } from './queue/publish';
@@ -40,59 +30,103 @@ import type { Env } from './types';
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/watchdog/heartbeat') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/watchdog/heartbeat', '/plugin/site/watchdog/heartbeat'])
+  ) {
     return handleHeartbeat(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/analytics/google/connect/start') {
-    return handleGoogleConnectStart(request, env, url.pathname);
-  }
-
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/analytics/google/status') {
-    return handleGoogleStatus(request, env, url.pathname);
-  }
-
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/analytics/google/deploy') {
-    return handleGoogleDeploy(request, env, url.pathname);
-  }
-
-  if (request.method === 'GET' && url.pathname === '/oauth/google/callback') {
-    return handleGoogleCallback(request, env);
-  }
-
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/auth/wallet/verify') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/auth/wallet/verify', '/plugin/site/auth/wallet/verify'])
+  ) {
     return handleWalletVerify(request, env);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/request') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, [
+      '/plugin/wp/host-optimizer/baseline',
+      '/plugin/site/host-optimizer/baseline',
+    ])
+  ) {
+    return handleHostOptimizerBaseline(request, env, url.pathname);
+  }
+
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, [
+      '/plugin/wp/analytics/goals/assistant',
+      '/plugin/site/analytics/goals/assistant',
+    ])
+  ) {
+    return handleGoalAssistant(request, env, url.pathname);
+  }
+
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/sandbox/request', '/plugin/site/sandbox/request'])
+  ) {
     return handleSandboxRequest(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/vote') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/sandbox/vote', '/plugin/site/sandbox/vote'])
+  ) {
     return handleSandboxVote(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/claim') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/sandbox/claim', '/plugin/site/sandbox/claim'])
+  ) {
     return handleSandboxClaim(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/release') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/sandbox/release', '/plugin/site/sandbox/release'])
+  ) {
     return handleSandboxRelease(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/conflicts/report') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, [
+      '/plugin/wp/sandbox/conflicts/report',
+      '/plugin/site/sandbox/conflicts/report',
+    ])
+  ) {
     return handleSandboxConflictReport(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/conflicts/list') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, [
+      '/plugin/wp/sandbox/conflicts/list',
+      '/plugin/site/sandbox/conflicts/list',
+    ])
+  ) {
     return handleSandboxConflictList(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/conflicts/resolve') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, [
+      '/plugin/wp/sandbox/conflicts/resolve',
+      '/plugin/site/sandbox/conflicts/resolve',
+    ])
+  ) {
     return handleSandboxConflictResolve(request, env, url.pathname);
   }
 
   return json({ ok: false, error: 'not_found' }, 404);
+}
+
+function matchesPath(pathname: string, candidates: string[]): boolean {
+  return candidates.includes(pathname);
 }
 
 async function handleHeartbeat(request: Request, env: Env, path: string): Promise<Response> {
@@ -128,6 +162,7 @@ async function handleHeartbeat(request: Request, env: Env, path: string): Promis
   }
 
   const payload = payloadResult.payload;
+  let automation: WatchdogLbAutomationResult | null = null;
   try {
     await withSiteLock(env.SITE_LOCK, payload.site_id, async () => {
       await upsertSite(env.DB, payload);
@@ -143,6 +178,11 @@ async function handleHeartbeat(request: Request, env: Env, path: string): Promis
 
         await enqueueJob(env.JOB_QUEUE, job);
       }
+
+      automation = await runWatchdogLbAutomation(env, {
+        pluginId: authResult.pluginId,
+        payload,
+      });
     });
   } catch (error) {
     if (error instanceof Error && error.message === 'site_lock_acquire_failed') {
@@ -151,7 +191,7 @@ async function handleHeartbeat(request: Request, env: Env, path: string): Promis
     return json({ ok: false, error: 'internal_error' }, 500);
   }
 
-  return json({ ok: true, commands: [{ type: 'noop' }] }, 200);
+  return json({ ok: true, commands: [{ type: 'noop' }], automation }, 200);
 }
 
 async function handleGoogleConnectStart(
@@ -424,6 +464,85 @@ async function handleWalletVerify(request: Request, env: Env): Promise<Response>
       verified: true,
       wallet_address: verification.walletAddress,
       wallet_network: verification.walletNetwork,
+    },
+    200,
+  );
+}
+
+async function handleHostOptimizerBaseline(
+  request: Request,
+  env: Env,
+  path: string,
+): Promise<Response> {
+  const auth = await authorizeSignedMutation(request, env, path);
+  if (!auth.authorized) {
+    return auth.response;
+  }
+
+  const payloadResult = parseHostOptimizerBaselinePayload(auth.rawBody);
+  if (!payloadResult.ok) {
+    return json({ ok: false, error: payloadResult.error }, 400);
+  }
+
+  const record = await createHostOptimizerBaseline(env.DB, {
+    pluginId: auth.pluginId,
+    siteUrl: payloadResult.payload.site_url,
+    providerName: payloadResult.payload.provider_name,
+    regionLabel: payloadResult.payload.region_label,
+    virtualizationOs: payloadResult.payload.virtualization_os,
+    cpuModel: payloadResult.payload.cpu_model,
+    cpuYear: payloadResult.payload.cpu_year,
+    ramGb: payloadResult.payload.ram_gb,
+    memoryClass: payloadResult.payload.memory_class,
+    webserverType: payloadResult.payload.webserver_type,
+    storageType: payloadResult.payload.storage_type,
+    uplinkMbps: payloadResult.payload.uplink_mbps,
+    gpuAccelerationMode: payloadResult.payload.gpu_acceleration_mode,
+    gpuModel: payloadResult.payload.gpu_model,
+    gpuCount: payloadResult.payload.gpu_count,
+    gpuVramGb: payloadResult.payload.gpu_vram_gb,
+    reason: payloadResult.payload.reason,
+    capturedAt: payloadResult.payload.captured_at,
+    homeTtfbMs: payloadResult.payload.home_ttfb_ms,
+    restTtfbMs: payloadResult.payload.rest_ttfb_ms,
+    cpuOpsPerSec: payloadResult.payload.cpu_ops_per_sec,
+    diskWriteMbPerSec: payloadResult.payload.disk_write_mb_per_sec,
+    diskReadMbPerSec: payloadResult.payload.disk_read_mb_per_sec,
+    memoryPressureScore: payloadResult.payload.memory_pressure_score,
+    payloadJson: payloadResult.payload.payload_json,
+  });
+
+  return json(
+    {
+      ok: true,
+      baseline_id: record.id,
+      plugin_id: record.plugin_id,
+      captured_at: record.captured_at,
+      ingested_at: record.ingested_at,
+    },
+    201,
+  );
+}
+
+async function handleGoalAssistant(request: Request, env: Env, path: string): Promise<Response> {
+  const auth = await authorizeSignedMutation(request, env, path);
+  if (!auth.authorized) {
+    return auth.response;
+  }
+
+  const payloadResult = parseGoalAssistantPayload(auth.rawBody);
+  if (!payloadResult.ok) {
+    return json({ ok: false, error: payloadResult.error }, 400);
+  }
+
+  const plannerResult = await buildGoalAssistantPlanWithAI(payloadResult.payload, env);
+
+  return json(
+    {
+      ok: true,
+      plan: plannerResult.plan,
+      planner: plannerResult.planner,
+      commands: [{ type: 'noop' }],
     },
     200,
   );
@@ -822,6 +941,7 @@ function parseHeartbeatPayload(
       load_avg: Array.isArray(payload.load_avg)
         ? payload.load_avg.map((item) => Number(item)).filter((item) => Number.isFinite(item))
         : [],
+      traffic_rps: optionalFiniteNumber(payload.traffic_rps),
       error_counts:
         payload.error_counts && typeof payload.error_counts === 'object'
           ? Object.fromEntries(
@@ -836,12 +956,37 @@ function parseHeartbeatPayload(
   };
 }
 
+function parseHostOptimizerBaselinePayload(
 function parseGoogleConnectStartPayload(
   rawBody: ArrayBuffer,
 ):
   | {
       ok: true;
       payload: {
+        site_url: string;
+        provider_name: string;
+        region_label: string;
+        virtualization_os: string;
+        cpu_model: string;
+        cpu_year: string;
+        ram_gb: string;
+        memory_class: string;
+        webserver_type: string;
+        storage_type: string;
+        uplink_mbps: string;
+        gpu_acceleration_mode: string;
+        gpu_model: string;
+        gpu_count: string;
+        gpu_vram_gb: string;
+        reason: string;
+        captured_at: string;
+        home_ttfb_ms: number | null;
+        rest_ttfb_ms: number | null;
+        cpu_ops_per_sec: number | null;
+        disk_write_mb_per_sec: number | null;
+        disk_read_mb_per_sec: number | null;
+        memory_pressure_score: number | null;
+        payload_json: string;
         site_id: string;
         return_url: string;
       };
@@ -907,17 +1052,7 @@ function parseGoogleDeployPayload(
 ):
   | {
       ok: true;
-      payload: {
-        site_id: string;
-        ga4_measurement_id: string;
-        ga4_property_id: string;
-        gtm_account_id: string;
-        gtm_container_id: string;
-        gtm_workspace_name: string;
-        primary_conversion: string;
-        secondary_conversions: string[];
-        dry_run: boolean;
-      };
+      payload: GoalAssistantPayload;
     }
   | {
       ok: false;
