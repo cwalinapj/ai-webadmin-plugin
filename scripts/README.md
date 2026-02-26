@@ -15,3 +15,10 @@ These scripts define the plugin-side operational verbs that emulate a human web 
 10. `rotate-secrets.sh`
 
 All scripts are currently stubs that log contract expectations and exit safely.
+
+## Current status
+- `launch-sandbox.sh` now supports a real LXD sandbox launch flow over SSH:
+  - reads VPS password from `SANDBOX_VPS_PASSWORD` or `~/.env` (`Password:` style)
+  - calls remote `/root/wp_sandbox_run.sh` with site/db parameters
+  - prints latest `report.json` from `/opt/wp-staging/sites/<site>/runs/<run_id>/`
+- Remaining scripts are scaffold stubs.

@@ -8,6 +8,7 @@ use WebAdminEdgeAgent\Admin\Tabs\LeadsTab;
 use WebAdminEdgeAgent\Admin\Tabs\SecurityTab;
 use WebAdminEdgeAgent\Admin\Tabs\UptimeTab;
 use WebAdminEdgeAgent\Api\Endpoints\AnalyticsGoogle;
+use WebAdminEdgeAgent\Api\Endpoints\AnalyticsGoalsAssistant;
 use WebAdminEdgeAgent\Api\Endpoints\Heartbeat;
 use WebAdminEdgeAgent\Storage\JobStore;
 use WebAdminEdgeAgent\Storage\Logger;
@@ -24,6 +25,8 @@ class Menu
 
     private AnalyticsGoogle $analyticsGoogle;
 
+    private AnalyticsGoalsAssistant $analyticsGoalsAssistant;
+
     private TabState $tabState;
 
     private JobStore $jobStore;
@@ -33,6 +36,7 @@ class Menu
         Logger $logger,
         Heartbeat $heartbeat,
         AnalyticsGoogle $analyticsGoogle,
+        AnalyticsGoalsAssistant $analyticsGoalsAssistant,
         TabState $tabState,
         JobStore $jobStore
     ) {
@@ -40,6 +44,7 @@ class Menu
         $this->logger = $logger;
         $this->heartbeat = $heartbeat;
         $this->analyticsGoogle = $analyticsGoogle;
+        $this->analyticsGoalsAssistant = $analyticsGoalsAssistant;
         $this->tabState = $tabState;
         $this->jobStore = $jobStore;
     }
@@ -49,6 +54,9 @@ class Menu
         add_action('admin_menu', [$this, 'registerMenu']);
         add_action('admin_post_webadmin_edge_agent_save_settings', [$this, 'handleSaveSettings']);
         add_action('admin_post_webadmin_edge_agent_save_analytics_settings', [$this, 'handleSaveAnalyticsSettings']);
+        add_action('admin_post_webadmin_edge_agent_generate_analytics_api_key', [$this, 'handleGenerateAnalyticsApiKey']);
+        add_action('admin_post_webadmin_edge_agent_generate_goal_plan', [$this, 'handleGenerateGoalPlan']);
+        add_action('admin_post_webadmin_edge_agent_apply_goal_plan', [$this, 'handleApplyGoalPlan']);
         add_action('admin_post_webadmin_edge_agent_send_heartbeat', [$this, 'handleSendHeartbeat']);
         add_action('admin_post_webadmin_edge_agent_start_google_connect', [$this, 'handleStartGoogleConnect']);
         add_action('admin_post_webadmin_edge_agent_refresh_google_status', [$this, 'handleRefreshGoogleStatus']);
@@ -126,6 +134,101 @@ class Menu
         $this->redirectWithTab('analytics');
     }
 
+    public function handleGenerateAnalyticsApiKey(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized', 'webadmin-edge-agent'));
+        }
+
+        check_admin_referer('webadmin_edge_agent_generate_analytics_api_key', 'webadmin_edge_agent_generate_analytics_api_key_nonce');
+
+        $token = '';
+        try {
+            $token = bin2hex(random_bytes(24));
+        } catch (\Throwable $exception) {
+            $token = wp_generate_password(48, false, false);
+        }
+
+        $this->options->saveSettings([
+            'capability_token_analytics' => $token,
+        ]);
+
+        $transientKey = 'webadmin_edge_agent_generated_analytics_api_key_' . get_current_user_id();
+        set_transient($transientKey, $token, 5 * MINUTE_IN_SECONDS);
+
+        add_settings_error('webadmin-edge-agent', 'analytics-api-key-generated', 'New Analytics API key generated and saved.', 'updated');
+        $this->redirectWithTab('analytics');
+    }
+
+    public function handleGenerateGoalPlan(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized', 'webadmin-edge-agent'));
+        }
+
+        check_admin_referer('webadmin_edge_agent_generate_goal_plan', 'webadmin_edge_agent_goal_plan_nonce');
+
+        $input = [
+            'analytics_goal_business_type' => isset($_POST['analytics_goal_business_type']) ? wp_unslash($_POST['analytics_goal_business_type']) : '',
+            'analytics_goal_objective' => isset($_POST['analytics_goal_objective']) ? wp_unslash($_POST['analytics_goal_objective']) : '',
+            'analytics_goal_channels' => isset($_POST['analytics_goal_channels']) ? wp_unslash($_POST['analytics_goal_channels']) : '',
+            'analytics_goal_form_types' => isset($_POST['analytics_goal_form_types']) ? wp_unslash($_POST['analytics_goal_form_types']) : '',
+            'analytics_goal_avg_value' => isset($_POST['analytics_goal_avg_value']) ? wp_unslash($_POST['analytics_goal_avg_value']) : '',
+        ];
+
+        $response = $this->analyticsGoalsAssistant->generate($input, 'manual');
+        if (!empty($response['ok'])) {
+            add_settings_error('webadmin-edge-agent', 'goal-plan-ok', 'AI goal plan generated.', 'updated');
+        } else {
+            $message = 'AI goal plan generation failed.';
+            if (!empty($response['error'])) {
+                $message .= ' ' . sanitize_text_field((string)$response['error']);
+            }
+            add_settings_error('webadmin-edge-agent', 'goal-plan-error', $message, 'error');
+        }
+
+        $this->redirectWithTab('analytics');
+    }
+
+    public function handleApplyGoalPlan(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized', 'webadmin-edge-agent'));
+        }
+
+        check_admin_referer('webadmin_edge_agent_apply_goal_plan', 'webadmin_edge_agent_apply_goal_plan_nonce');
+
+        $settings = $this->options->getSettings();
+        $planJson = isset($settings['analytics_goal_last_plan_json'])
+            ? (string)$settings['analytics_goal_last_plan_json']
+            : '';
+        if ($planJson === '') {
+            add_settings_error('webadmin-edge-agent', 'goal-plan-apply-error', 'No goal plan found. Generate a plan first.', 'error');
+            $this->redirectWithTab('analytics');
+        }
+
+        $decoded = json_decode($planJson, true);
+        if (!is_array($decoded)) {
+            add_settings_error('webadmin-edge-agent', 'goal-plan-apply-error', 'Stored goal plan is invalid JSON.', 'error');
+            $this->redirectWithTab('analytics');
+        }
+
+        $updates = $this->extractGoalPlanSettings($decoded);
+        if (empty($updates)) {
+            add_settings_error('webadmin-edge-agent', 'goal-plan-apply-error', 'Goal plan did not include usable conversion settings.', 'error');
+            $this->redirectWithTab('analytics');
+        }
+
+        $this->options->saveSettings($updates);
+        $this->tabState->recordSync('analytics', 'ok', 'Applied AI goal plan to analytics settings.');
+        $this->tabState->addFinding('analytics', 'info', 'AI goal plan applied', 'Conversion and funnel settings were updated from assistant output.');
+        $this->jobStore->add('analytics', 'apply_goal_plan', 'completed', 0.0, false, ['source' => 'manual']);
+        $this->logger->log('info', 'Applied AI goal plan settings');
+
+        add_settings_error('webadmin-edge-agent', 'goal-plan-apply-ok', 'AI goal plan applied to Analytics settings.', 'updated');
+        $this->redirectWithTab('analytics');
+    }
+
     public function handleSendHeartbeat(): void
     {
         if (!current_user_can('manage_options')) {
@@ -160,7 +263,7 @@ class Menu
         $response = $this->analyticsGoogle->startConnect($returnUrl);
 
         if (!empty($response['ok']) && isset($response['body']['auth_url'])) {
-            wp_safe_redirect(esc_url_raw((string)$response['body']['auth_url']));
+            wp_redirect(esc_url_raw((string)$response['body']['auth_url']));
             exit;
         }
 
@@ -282,9 +385,18 @@ class Menu
         }
 
         if ($tabObject instanceof AnalyticsTab) {
+            $generatedKeyTransient = 'webadmin_edge_agent_generated_analytics_api_key_' . get_current_user_id();
+            $generatedKey = get_transient($generatedKeyTransient);
+            if (is_string($generatedKey) && $generatedKey !== '') {
+                delete_transient($generatedKeyTransient);
+            } else {
+                $generatedKey = '';
+            }
+
             $tabObject->render([
                 'settings' => $settings,
                 'capability_token_analytics_configured' => $this->options->hasSecret('capability_token_analytics'),
+                'generated_analytics_api_key' => $generatedKey,
                 'google_connected' => !empty($settings['analytics_google_connected']),
                 'google_account_email' => (string)($settings['analytics_google_account_email'] ?? ''),
                 'google_last_status' => (string)($settings['analytics_google_last_status'] ?? 'never'),
@@ -477,5 +589,131 @@ class Menu
         $url = admin_url('admin.php?page=webadmin-edge-agent&tab=' . rawurlencode($tab));
         wp_safe_redirect($url);
         exit;
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    private function extractGoalPlanSettings(array $payload): array
+    {
+        $plan = [];
+        if (isset($payload['plan']) && is_array($payload['plan'])) {
+            $plan = $payload['plan'];
+        } elseif (isset($payload['goals']) || isset($payload['tracking_plan'])) {
+            $plan = $payload;
+        }
+
+        if (empty($plan)) {
+            return [];
+        }
+
+        $updates = [];
+        $suggested = isset($plan['suggested_plugin_settings']) && is_array($plan['suggested_plugin_settings'])
+            ? $plan['suggested_plugin_settings']
+            : [];
+
+        $primary = $this->normalizeEventName((string)($suggested['analytics_primary_conversion'] ?? ''));
+        if ($primary === '' && isset($plan['goals']['primary']) && is_array($plan['goals']['primary'])) {
+            $primary = $this->normalizeEventName((string)($plan['goals']['primary']['event'] ?? ''));
+        }
+        if ($primary !== '') {
+            $updates['analytics_primary_conversion'] = $primary;
+        }
+
+        $secondary = $this->normalizeEventList($suggested['analytics_secondary_conversions'] ?? []);
+        if (empty($secondary) && isset($plan['goals']['secondary']) && is_array($plan['goals']['secondary'])) {
+            $fallback = [];
+            foreach ($plan['goals']['secondary'] as $goal) {
+                if (is_array($goal) && isset($goal['event'])) {
+                    $fallback[] = (string)$goal['event'];
+                }
+            }
+            $secondary = $this->normalizeEventList($fallback);
+        }
+        if (!empty($secondary)) {
+            $updates['analytics_secondary_conversions'] = implode("\n", $secondary);
+        }
+
+        $funnel = $this->normalizeEventList($suggested['analytics_funnel_steps'] ?? []);
+        if (empty($funnel) && isset($plan['tracking_plan']['key_funnel_events']) && is_array($plan['tracking_plan']['key_funnel_events'])) {
+            $funnel = $this->normalizeEventList($plan['tracking_plan']['key_funnel_events']);
+        }
+        if (!empty($funnel)) {
+            $updates['analytics_funnel_steps'] = implode("\n", $funnel);
+        }
+
+        $keyPages = $this->normalizePageList($suggested['analytics_key_pages'] ?? []);
+        if (!empty($keyPages)) {
+            $updates['analytics_key_pages'] = implode("\n", $keyPages);
+        }
+
+        return $updates;
+    }
+
+    /**
+     * @param mixed $value
+     * @return array<int, string>
+     */
+    private function normalizeEventList($value): array
+    {
+        if (!is_array($value)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($value as $item) {
+            $normalized = $this->normalizeEventName((string)$item);
+            if ($normalized === '') {
+                continue;
+            }
+            $out[] = $normalized;
+        }
+
+        return array_values(array_unique($out));
+    }
+
+    private function normalizeEventName(string $value): string
+    {
+        $normalized = strtolower(trim($value));
+        $normalized = preg_replace('/[^a-z0-9_]+/', '_', $normalized);
+        if (!is_string($normalized)) {
+            return '';
+        }
+        $normalized = trim($normalized, '_');
+        if ($normalized === '') {
+            return '';
+        }
+
+        return sanitize_key($normalized);
+    }
+
+    /**
+     * @param mixed $value
+     * @return array<int, string>
+     */
+    private function normalizePageList($value): array
+    {
+        if (!is_array($value)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($value as $item) {
+            $page = trim((string)$item);
+            if ($page === '') {
+                continue;
+            }
+            if ($page[0] !== '/') {
+                $page = '/' . ltrim($page, '/');
+            }
+            $page = preg_replace('/[^a-zA-Z0-9\/\-_]/', '', $page);
+            if (!is_string($page) || $page === '') {
+                continue;
+            }
+            $out[] = $page;
+        }
+
+        return array_values(array_unique($out));
     }
 }

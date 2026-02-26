@@ -1,0 +1,22 @@
+{
+  "name": "ai-vps-control-panel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prebuild": "npm --prefix ../panel-addon-core run build",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
+    "pretest": "npm --prefix ../panel-addon-core run build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "panel-addon-core": "file:../panel-addon-core"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

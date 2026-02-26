@@ -367,7 +367,7 @@ function safeMetadataJson(metadata: Record<string, unknown> | undefined): string
     return null;
   }
   if (text.length > MAX_METADATA_JSON_BYTES) {
-    return text.slice(0, MAX_METADATA_JSON_BYTES);
+    return null;
   }
   return text;
 }

@@ -83,10 +83,37 @@ describe('wallet verify route', () => {
     expect(body.verified).toBe(false);
     expect(body.error).toBe('invalid_wallet_signature');
   });
+
+  it('accepts site route alias for wallet verification', async () => {
+    const account = privateKeyToAccount(
+      '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4d59f7ddf96d3',
+    );
+    const message = 'AI WebAdmin Login Challenge\nNonce: nonce-site-alias';
+    const signature = await account.signMessage({ message });
+    const payload = {
+      session_id: 'session-site-alias',
+      wallet_network: 'ethereum',
+      wallet_address: account.address,
+      wallet_signature: signature,
+      wallet_message: message,
+    };
+
+    const response = await handleRequest(
+      await signedWalletRequest(payload, '/plugin/site/auth/wallet/verify'),
+      env as never,
+    );
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.verified).toBe(true);
+  });
 });
 
-async function signedWalletRequest(payload: Record<string, unknown>): Promise<Request> {
-  const path = '/plugin/wp/auth/wallet/verify';
+async function signedWalletRequest(
+  payload: Record<string, unknown>,
+  path = '/plugin/wp/auth/wallet/verify',
+): Promise<Request> {
   const timestamp = Math.floor(Date.now() / 1000);
   const body = JSON.stringify(payload);
   const signature = await hmacSha256Hex(env.WP_PLUGIN_SHARED_SECRET, `${timestamp}.${body}`);

@@ -9,19 +9,9 @@ This repo is now organized as a multi-product suite (not web3-only):
 - `apps/panel-addon-core`: scaffold for non-WordPress control-panel addons.
 - `apps/ai-vps-control-panel`: AI-chat-operated VPS control-panel backend scaffold.
 - `plugins/ai-webadmin`: legacy all-in-one AI WebAdmin plugin.
-- [`plugins/tolldns`](plugins/tolldns/README.md): TollDNS helper plugin.
-- `plugins/ai-wp-host-optimizer`: host baseline and VPS recommendation telemetry plugin.
-- `plugins/ai-addwords-meta-plugin`: paid traffic AI orchestration + CPA/Web3 settlement plugin.
+- [`plugins/tolldns`](plugins/tolldns/README.md): TollDNS helper plugin — part of the [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-) platform.
 - [`plugins/toll-comments`](plugins/toll-comments/README.md): DDNS Toll Comments — refundable credit-based comment spam protection (merged from [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-)).
 - [`plugins/wp-optin`](plugins/wp-optin/README.md): DDNS Opt-in — connect a WordPress site to the DECENTRALIZED-DNS control plane (merged from [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-)).
-
-## AI_WP_Plugin_Family
-
-- [AI_WP_Plugin_Family](apps/webadmin-edge-agent/readme.txt) - WebAdmin Edge Agent
-- [AI_WP_Plugin_Family](plugins/ai-webadmin/README.md) - AI WebAdmin
-- [AI_WP_Plugin_Family](plugins/tolldns/README.md) - TollDNS
-- [AI_WP_Plugin_Family](plugins/ai-wp-host-optimizer/README.md) - AI WP Host Optimizer Plugin
-- [AI_WP_Plugin_Family](plugins/ai-addwords-meta-plugin/README.md) - AI AddWords + Meta Paid Traffic Plugin
 
 ## Repository layout
 
@@ -36,8 +26,6 @@ repo/
   plugins/
     ai-webadmin/
     tolldns/
-    ai-wp-host-optimizer/
-    ai-addwords-meta-plugin/
     toll-comments/
     wp-optin/
   docs/
@@ -79,30 +67,7 @@ npm install
 npm run dev
 ```
 
-### Panel Addon Core
-
-```bash
-cd apps/panel-addon-core
-npm install
-npm test
-npm run build
-```
-
-### AI VPS Control Panel
-
-```bash
-cd apps/ai-vps-control-panel
-npm install
-export AI_VPS_DB_PATH="./data/ai-vps-control-panel.sqlite"
-export AI_VPS_API_KEYS="admin-a:admin:tenant-a,operator-a:operator:tenant-a"
-npm test
-npm run build
-npm start
-```
-
-### Analytics OAuth + Deploy setup
-
-Set worker secrets:
+Set required secrets/vars for Google OAuth + deploy:
 
 ```bash
 cd apps/control-plane-worker
@@ -110,10 +75,16 @@ wrangler secret put GOOGLE_CLIENT_ID
 wrangler secret put GOOGLE_CLIENT_SECRET
 wrangler secret put GOOGLE_OAUTH_REDIRECT_URI
 wrangler secret put CAP_TOKEN_ANALYTICS_WRITE
+wrangler secret put ANALYTICS_GOAL_ASSISTANT_GATEWAY_ID # optional
 ```
 
 Worker callback:
 - `GET /oauth/google/callback`
+- AI planner uses Workers AI binding `AI` with fallback to deterministic planning.
+- Optional vars in `wrangler.toml`:
+  - `ANALYTICS_GOAL_ASSISTANT_USE_AI` (`1` or `0`)
+  - `ANALYTICS_GOAL_ASSISTANT_MODEL` (default `@cf/meta/llama-3.1-8b-instruct`)
+  - `ANALYTICS_GOAL_ASSISTANT_GATEWAY_ID` (optional AI Gateway id)
 
 WP Admin flow:
 1. Open `WebAdmin Edge Agent -> Analytics & Reporting`.
@@ -153,6 +124,21 @@ Selection order is weighted by:
 Claims are serialized with a Durable Object lock so multiple agents do not claim the same sandbox slot.
 Agents can also share a conflict pool for blocked work, read active conflicts, and resolve/dismiss them after remediation.
 All sandbox routes use signed plugin auth and require capability token `CAP_TOKEN_SANDBOX_WRITE`.
+
+## Analytics Google deploy (OAuth + one-click conversions)
+
+New worker routes:
+- `POST /plugin/wp/analytics/google/connect/start`
+- `POST /plugin/wp/analytics/google/status`
+- `POST /plugin/wp/analytics/google/deploy`
+- `GET /oauth/google/callback`
+
+Plugin tab:
+- `Analytics & Reporting` now supports:
+  - Connect Google account (OAuth)
+  - Save GA4/GTM IDs + analytics capability token
+  - One-click deploy for GTM tags/triggers and GA4 conversions
+  - Optional GTM snippet + conversion event bridge injection
 
 ## Tests
 
