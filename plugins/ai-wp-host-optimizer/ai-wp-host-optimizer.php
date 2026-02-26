@@ -632,7 +632,7 @@ function ai_wp_host_optimizer_anchor_store_sample(array $settings, array $sample
         ];
     }
 
-    if (strtolower(parse_url($baseUrl, PHP_URL_SCHEME) ?? '') !== 'https') {
+    if (strtolower((string) parse_url($baseUrl, PHP_URL_SCHEME)) !== 'https') {
         return [
             'ok' => false,
             'skipped' => true,

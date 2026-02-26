@@ -8,7 +8,7 @@ export interface AnchorObjectRecord {
   sha256: string;
   priority: AnchorPriority;
   retention_class: RetentionClass;
-  primary_provider: AnchorProvider;
+  primary_provider: 'r2' | 'b2';
   status: string;
   r2_key: string | null;
   b2_file_name: string | null;
@@ -219,7 +219,7 @@ export async function findTaskWithObjectById(
     sha256: String(row.sha256),
     priority: row.priority as AnchorPriority,
     retention_class: row.retention_class as RetentionClass,
-    primary_provider: row.primary_provider as AnchorProvider,
+    primary_provider: row.primary_provider as 'r2' | 'b2',
     status: String(row.status),
     r2_key: row.r2_key ? String(row.r2_key) : null,
     b2_file_name: row.b2_file_name ? String(row.b2_file_name) : null,
