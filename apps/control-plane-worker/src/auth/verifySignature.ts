@@ -1,7 +1,9 @@
 export interface SignatureEnv {
   WP_PLUGIN_SHARED_SECRET: string;
   CAP_TOKEN_UPTIME_WRITE: string;
+  CAP_TOKEN_ANALYTICS_WRITE?: string;
   CAP_TOKEN_SANDBOX_WRITE?: string;
+  CAP_TOKEN_HOST_OPTIMIZER_WRITE?: string;
   REPLAY_WINDOW_SECONDS?: string;
 }
 
@@ -133,7 +135,7 @@ function verifyCapabilityToken(
   tokenHeader: string | null,
   env: SignatureEnv,
 ): { ok: true } | VerifyError {
-  if (path === '/plugin/wp/watchdog/heartbeat') {
+  if (path === '/plugin/wp/watchdog/heartbeat' || path === '/plugin/site/watchdog/heartbeat') {
     if (!env.CAP_TOKEN_UPTIME_WRITE) {
       return { ok: false, status: 500, error: 'worker_missing_capability_token' };
     }
@@ -146,7 +148,7 @@ function verifyCapabilityToken(
     }
   }
 
-  if (path.startsWith('/plugin/wp/sandbox/')) {
+  if (path.startsWith('/plugin/wp/sandbox/') || path.startsWith('/plugin/site/sandbox/')) {
     if (!env.CAP_TOKEN_SANDBOX_WRITE) {
       return { ok: false, status: 500, error: 'worker_missing_sandbox_capability_token' };
     }
@@ -155,6 +157,35 @@ function verifyCapabilityToken(
       return { ok: false, status: 403, error: 'missing_capability_token' };
     }
     if (!timingSafeEqual(token, env.CAP_TOKEN_SANDBOX_WRITE)) {
+      return { ok: false, status: 403, error: 'invalid_capability_token' };
+    }
+  }
+
+  if (
+    path === '/plugin/wp/host-optimizer/baseline' ||
+    path === '/plugin/site/host-optimizer/baseline'
+  ) {
+    if (!env.CAP_TOKEN_HOST_OPTIMIZER_WRITE) {
+      return { ok: false, status: 500, error: 'worker_missing_host_optimizer_capability_token' };
+    }
+    const token = tokenHeader?.trim() ?? '';
+    if (token === '') {
+      return { ok: false, status: 403, error: 'missing_capability_token' };
+    }
+    if (!timingSafeEqual(token, env.CAP_TOKEN_HOST_OPTIMIZER_WRITE)) {
+      return { ok: false, status: 403, error: 'invalid_capability_token' };
+    }
+  }
+
+  if (path.startsWith('/plugin/wp/analytics/') || path.startsWith('/plugin/site/analytics/')) {
+    if (!env.CAP_TOKEN_ANALYTICS_WRITE) {
+      return { ok: false, status: 500, error: 'worker_missing_analytics_capability_token' };
+    }
+    const token = tokenHeader?.trim() ?? '';
+    if (token === '') {
+      return { ok: false, status: 403, error: 'missing_capability_token' };
+    }
+    if (!timingSafeEqual(token, env.CAP_TOKEN_ANALYTICS_WRITE)) {
       return { ok: false, status: 403, error: 'invalid_capability_token' };
     }
   }

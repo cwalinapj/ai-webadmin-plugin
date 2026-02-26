@@ -1,5 +1,11 @@
 # TollDNS
 
+## Plugin family links
+- [AI_WP_Plugin_Family](../ai-webadmin/README.md) - AI WebAdmin
+- [AI_WP_Plugin_Family](../../apps/webadmin-edge-agent/readme.txt) - WebAdmin Edge Agent
+- [AI_WP_Plugin_Family](../ai-wp-host-optimizer/README.md) - AI WP Host Optimizer Plugin
+- [AI_WP_Plugin_Family](../../README.md#ai_wp_plugin_family) - Family index
+
 ## What it does
 - Provides a functional `tolldns/tolldns.php` plugin slug for AI WebAdmin free-tier enforcement.
 - Exposes status via `GET /wp-json/tolldns/v1/status`.

@@ -30,3 +30,4 @@ new_sqlite_classes = ["SiteLock"]
 
 [vars]
 REPLAY_WINDOW_SECONDS = "300"
+CAP_TOKEN_HOST_OPTIMIZER_WRITE = "REPLACE_ME"

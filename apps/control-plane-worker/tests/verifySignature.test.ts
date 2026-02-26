@@ -9,6 +9,8 @@ import {
 const env = {
   WP_PLUGIN_SHARED_SECRET: 'super-secret-value',
   CAP_TOKEN_UPTIME_WRITE: 'cap-uptime-token',
+  CAP_TOKEN_ANALYTICS_WRITE: 'cap-analytics-token',
+  CAP_TOKEN_HOST_OPTIMIZER_WRITE: 'cap-host-token',
   REPLAY_WINDOW_SECONDS: '300',
 };
 
@@ -116,5 +118,143 @@ describe('verifySignedRequest', () => {
     if (!result.ok) {
       expect(result.error).toBe('signature_mismatch');
     }
+  });
+
+  it('requires host optimizer capability token for baseline route', async () => {
+    const body = JSON.stringify({ site_url: 'https://example.com/' });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const nonce = '7f0c65df-df73-45b1-a838-f03d9568ae4e';
+    const path = '/plugin/wp/host-optimizer/baseline';
+    const method = 'POST';
+    const bodyHash = await sha256Hex(body);
+    const canonical = buildCanonical(timestamp, nonce, method, path, bodyHash);
+    const signature = await hmacSha256Hex(env.WP_PLUGIN_SHARED_SECRET, canonical);
+
+    const request = new Request(`https://api.example.com${path}`, {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        'x-plugin-id': 'plugin-1',
+        'x-plugin-timestamp': String(timestamp),
+        'x-plugin-nonce': nonce,
+        'x-plugin-signature': signature,
+      },
+      body,
+    });
+
+    const result = await verifySignedRequest({
+      request,
+      rawBody: await request.clone().arrayBuffer(),
+      path,
+      env,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe('missing_capability_token');
+    }
+  });
+
+  it('requires host optimizer capability token for /plugin/site alias path', async () => {
+    const body = JSON.stringify({ site_url: 'https://example.com/' });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const nonce = '4be355e6-bd12-45ee-a17c-79fcd67f33d8';
+    const path = '/plugin/site/host-optimizer/baseline';
+    const method = 'POST';
+    const bodyHash = await sha256Hex(body);
+    const canonical = buildCanonical(timestamp, nonce, method, path, bodyHash);
+    const signature = await hmacSha256Hex(env.WP_PLUGIN_SHARED_SECRET, canonical);
+
+    const request = new Request(`https://api.example.com${path}`, {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        'x-plugin-id': 'plugin-1',
+        'x-plugin-timestamp': String(timestamp),
+        'x-plugin-nonce': nonce,
+        'x-plugin-signature': signature,
+      },
+      body,
+    });
+
+    const result = await verifySignedRequest({
+      request,
+      rawBody: await request.clone().arrayBuffer(),
+      path,
+      env,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe('missing_capability_token');
+    }
+  });
+
+  it('requires analytics capability token for goal assistant route', async () => {
+    const body = JSON.stringify({ site_id: 'site-1', domain: 'example.com' });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const nonce = '7b7bb8a1-9c95-4866-b5ab-06ae2f34620a';
+    const path = '/plugin/wp/analytics/goals/assistant';
+    const method = 'POST';
+    const bodyHash = await sha256Hex(body);
+    const canonical = buildCanonical(timestamp, nonce, method, path, bodyHash);
+    const signature = await hmacSha256Hex(env.WP_PLUGIN_SHARED_SECRET, canonical);
+
+    const request = new Request(`https://api.example.com${path}`, {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        'x-plugin-id': 'plugin-1',
+        'x-plugin-timestamp': String(timestamp),
+        'x-plugin-nonce': nonce,
+        'x-plugin-signature': signature,
+      },
+      body,
+    });
+
+    const result = await verifySignedRequest({
+      request,
+      rawBody: await request.clone().arrayBuffer(),
+      path,
+      env,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe('missing_capability_token');
+    }
+  });
+
+  it('verifies analytics capability token for /plugin/site analytics alias', async () => {
+    const body = JSON.stringify({ site_id: 'site-1', domain: 'example.com' });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const nonce = '88ad212e-8da1-495e-8085-63a3f9393fd8';
+    const path = '/plugin/site/analytics/goals/assistant';
+    const method = 'POST';
+    const bodyHash = await sha256Hex(body);
+    const canonical = buildCanonical(timestamp, nonce, method, path, bodyHash);
+    const signature = await hmacSha256Hex(env.WP_PLUGIN_SHARED_SECRET, canonical);
+
+    const request = new Request(`https://api.example.com${path}`, {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        'x-plugin-id': 'plugin-1',
+        'x-plugin-timestamp': String(timestamp),
+        'x-plugin-nonce': nonce,
+        'x-plugin-signature': signature,
+        'x-capability-token': env.CAP_TOKEN_ANALYTICS_WRITE,
+      },
+      body,
+    });
+
+    const result = await verifySignedRequest({
+      request,
+      rawBody: await request.clone().arrayBuffer(),
+      path,
+      env,
+    });
+
+    expect(result.ok).toBe(true);
   });
 });

@@ -19,5 +19,20 @@ The plugin expects the following backend paths to remain stable:
 - `/plugin/wp/sandbox/conflicts/report`
 - `/plugin/wp/sandbox/conflicts/list`
 - `/plugin/wp/sandbox/conflicts/resolve`
+- `/plugin/wp/host-optimizer/baseline`
+
+VPS control-panel addons should use the same contracts with the `site` alias:
+- `/plugin/site/watchdog/heartbeat`
+- `/plugin/site/auth/wallet/verify`
+- `/plugin/site/host-optimizer/baseline`
+- `/plugin/site/sandbox/request`
+- `/plugin/site/sandbox/vote`
+- `/plugin/site/sandbox/claim`
+- `/plugin/site/sandbox/release`
+- `/plugin/site/sandbox/conflicts/report`
+- `/plugin/site/sandbox/conflicts/list`
+- `/plugin/site/sandbox/conflicts/resolve`
+
+Both `wp` and `site` routes are accepted by the worker so WordPress agents and non-WordPress panel addons share one control plane.
 
 For canonical schema definitions, reference `Sitebuilder1.0/api-contracts.md`.

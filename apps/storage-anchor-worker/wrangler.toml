@@ -1,0 +1,24 @@
+name = "storage-anchor-worker"
+main = "src/index.ts"
+compatibility_date = "2026-02-26"
+
+[[d1_databases]]
+binding = "ANCHOR_DB"
+database_name = "storage_anchor"
+database_id = "REPLACE_WITH_REAL_DATABASE_ID"
+migrations_dir = "src/db/migrations"
+
+[[r2_buckets]]
+binding = "ANCHOR_R2"
+bucket_name = "REPLACE_WITH_R2_BUCKET"
+
+[[queues.producers]]
+binding = "ANCHOR_QUEUE"
+queue = "storage-anchor-tasks"
+
+[[queues.consumers]]
+queue = "storage-anchor-tasks"
+
+[vars]
+MAX_INLINE_OBJECT_BYTES = "5242880"
+IPFS_FREE_QUOTA_BYTES = "10737418240"

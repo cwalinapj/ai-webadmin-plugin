@@ -2,6 +2,13 @@
 
 This plugin connects WordPress comments to your Cloudflare Worker endpoint for AI moderation.
 
+## Plugin family links
+
+- [AI_WP_Plugin_Family](../../apps/webadmin-edge-agent/readme.txt) - WebAdmin Edge Agent
+- [AI_WP_Plugin_Family](../tolldns/README.md) - TollDNS
+- [AI_WP_Plugin_Family](../ai-wp-host-optimizer/README.md) - AI WP Host Optimizer Plugin
+- [AI_WP_Plugin_Family](../../README.md#ai_wp_plugin_family) - Family index
+
 ## Features included
 
 1. Signed moderation requests to Worker endpoint:

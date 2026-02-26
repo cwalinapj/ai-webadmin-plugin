@@ -21,6 +21,13 @@ WebAdmin Edge Agent provides five admin tabs:
 
 Milestone 1 includes signed heartbeat transport, replay protection headers, and an event log viewer.
 
+AI_WP_Plugin_Family links:
+
+* [AI_WP_Plugin_Family](../../plugins/ai-webadmin/README.md) - AI WebAdmin
+* [AI_WP_Plugin_Family](../../plugins/tolldns/README.md) - TollDNS
+* [AI_WP_Plugin_Family](../../plugins/ai-wp-host-optimizer/README.md) - AI WP Host Optimizer Plugin
+* [AI_WP_Plugin_Family](../../README.md#ai_wp_plugin_family) - Family index
+
 == Installation ==
 
 1. Upload the `webadmin-edge-agent` directory to `/wp-content/plugins/`.

@@ -2,7 +2,9 @@ import { verifyLegacySignedRequest } from './auth/verifyLegacySignature';
 import { consumeIdempotencyKey, consumeNonce } from './auth/replay';
 import { verifySignedRequest } from './auth/verifySignature';
 import { verifyWalletChallenge, type WalletVerifyPayload } from './auth/verifyWallet';
+import { buildGoalAssistantPlan, type GoalAssistantPayload } from './analytics/buildGoalAssistant';
 import { withSiteLock } from './durable/withSiteLock';
+import { createHostOptimizerBaseline } from './hostOptimizer/store';
 import { createJob } from './jobs/createJob';
 import { heartbeatRiskScore, shouldCreateHeartbeatJob } from './policy/heartbeat';
 import { enqueueJob } from './queue/publish';
@@ -26,43 +28,103 @@ import type { Env } from './types';
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/watchdog/heartbeat') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/watchdog/heartbeat', '/plugin/site/watchdog/heartbeat'])
+  ) {
     return handleHeartbeat(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/auth/wallet/verify') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/auth/wallet/verify', '/plugin/site/auth/wallet/verify'])
+  ) {
     return handleWalletVerify(request, env);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/request') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, [
+      '/plugin/wp/host-optimizer/baseline',
+      '/plugin/site/host-optimizer/baseline',
+    ])
+  ) {
+    return handleHostOptimizerBaseline(request, env, url.pathname);
+  }
+
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, [
+      '/plugin/wp/analytics/goals/assistant',
+      '/plugin/site/analytics/goals/assistant',
+    ])
+  ) {
+    return handleGoalAssistant(request, env, url.pathname);
+  }
+
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/sandbox/request', '/plugin/site/sandbox/request'])
+  ) {
     return handleSandboxRequest(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/vote') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/sandbox/vote', '/plugin/site/sandbox/vote'])
+  ) {
     return handleSandboxVote(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/claim') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/sandbox/claim', '/plugin/site/sandbox/claim'])
+  ) {
     return handleSandboxClaim(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/release') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, ['/plugin/wp/sandbox/release', '/plugin/site/sandbox/release'])
+  ) {
     return handleSandboxRelease(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/conflicts/report') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, [
+      '/plugin/wp/sandbox/conflicts/report',
+      '/plugin/site/sandbox/conflicts/report',
+    ])
+  ) {
     return handleSandboxConflictReport(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/conflicts/list') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, [
+      '/plugin/wp/sandbox/conflicts/list',
+      '/plugin/site/sandbox/conflicts/list',
+    ])
+  ) {
     return handleSandboxConflictList(request, env, url.pathname);
   }
 
-  if (request.method === 'POST' && url.pathname === '/plugin/wp/sandbox/conflicts/resolve') {
+  if (
+    request.method === 'POST' &&
+    matchesPath(url.pathname, [
+      '/plugin/wp/sandbox/conflicts/resolve',
+      '/plugin/site/sandbox/conflicts/resolve',
+    ])
+  ) {
     return handleSandboxConflictResolve(request, env, url.pathname);
   }
 
   return json({ ok: false, error: 'not_found' }, 404);
+}
+
+function matchesPath(pathname: string, candidates: string[]): boolean {
+  return candidates.includes(pathname);
 }
 
 async function handleHeartbeat(request: Request, env: Env, path: string): Promise<Response> {
@@ -159,6 +221,84 @@ async function handleWalletVerify(request: Request, env: Env): Promise<Response>
       verified: true,
       wallet_address: verification.walletAddress,
       wallet_network: verification.walletNetwork,
+    },
+    200,
+  );
+}
+
+async function handleHostOptimizerBaseline(
+  request: Request,
+  env: Env,
+  path: string,
+): Promise<Response> {
+  const auth = await authorizeSignedMutation(request, env, path);
+  if (!auth.authorized) {
+    return auth.response;
+  }
+
+  const payloadResult = parseHostOptimizerBaselinePayload(auth.rawBody);
+  if (!payloadResult.ok) {
+    return json({ ok: false, error: payloadResult.error }, 400);
+  }
+
+  const record = await createHostOptimizerBaseline(env.DB, {
+    pluginId: auth.pluginId,
+    siteUrl: payloadResult.payload.site_url,
+    providerName: payloadResult.payload.provider_name,
+    regionLabel: payloadResult.payload.region_label,
+    virtualizationOs: payloadResult.payload.virtualization_os,
+    cpuModel: payloadResult.payload.cpu_model,
+    cpuYear: payloadResult.payload.cpu_year,
+    ramGb: payloadResult.payload.ram_gb,
+    memoryClass: payloadResult.payload.memory_class,
+    webserverType: payloadResult.payload.webserver_type,
+    storageType: payloadResult.payload.storage_type,
+    uplinkMbps: payloadResult.payload.uplink_mbps,
+    gpuAccelerationMode: payloadResult.payload.gpu_acceleration_mode,
+    gpuModel: payloadResult.payload.gpu_model,
+    gpuCount: payloadResult.payload.gpu_count,
+    gpuVramGb: payloadResult.payload.gpu_vram_gb,
+    reason: payloadResult.payload.reason,
+    capturedAt: payloadResult.payload.captured_at,
+    homeTtfbMs: payloadResult.payload.home_ttfb_ms,
+    restTtfbMs: payloadResult.payload.rest_ttfb_ms,
+    cpuOpsPerSec: payloadResult.payload.cpu_ops_per_sec,
+    diskWriteMbPerSec: payloadResult.payload.disk_write_mb_per_sec,
+    diskReadMbPerSec: payloadResult.payload.disk_read_mb_per_sec,
+    memoryPressureScore: payloadResult.payload.memory_pressure_score,
+    payloadJson: payloadResult.payload.payload_json,
+  });
+
+  return json(
+    {
+      ok: true,
+      baseline_id: record.id,
+      plugin_id: record.plugin_id,
+      captured_at: record.captured_at,
+      ingested_at: record.ingested_at,
+    },
+    201,
+  );
+}
+
+async function handleGoalAssistant(request: Request, env: Env, path: string): Promise<Response> {
+  const auth = await authorizeSignedMutation(request, env, path);
+  if (!auth.authorized) {
+    return auth.response;
+  }
+
+  const payloadResult = parseGoalAssistantPayload(auth.rawBody);
+  if (!payloadResult.ok) {
+    return json({ ok: false, error: payloadResult.error }, 400);
+  }
+
+  const plan = buildGoalAssistantPlan(payloadResult.payload);
+
+  return json(
+    {
+      ok: true,
+      plan,
+      commands: [{ type: 'noop' }],
     },
     200,
   );
@@ -567,6 +707,138 @@ function parseHeartbeatPayload(
             )
           : {},
       site_url: typeof payload.site_url === 'string' ? payload.site_url : '',
+    },
+  };
+}
+
+function parseHostOptimizerBaselinePayload(
+  rawBody: ArrayBuffer,
+):
+  | {
+      ok: true;
+      payload: {
+        site_url: string;
+        provider_name: string;
+        region_label: string;
+        virtualization_os: string;
+        cpu_model: string;
+        cpu_year: string;
+        ram_gb: string;
+        memory_class: string;
+        webserver_type: string;
+        storage_type: string;
+        uplink_mbps: string;
+        gpu_acceleration_mode: string;
+        gpu_model: string;
+        gpu_count: string;
+        gpu_vram_gb: string;
+        reason: string;
+        captured_at: string;
+        home_ttfb_ms: number | null;
+        rest_ttfb_ms: number | null;
+        cpu_ops_per_sec: number | null;
+        disk_write_mb_per_sec: number | null;
+        disk_read_mb_per_sec: number | null;
+        memory_pressure_score: number | null;
+        payload_json: string;
+      };
+    }
+  | {
+      ok: false;
+      error: string;
+    } {
+  const parsedResult = parseJsonObjectBody(rawBody);
+  if (!parsedResult.ok) {
+    return parsedResult;
+  }
+  const payload = parsedResult.payload;
+
+  const profile =
+    payload.profile && typeof payload.profile === 'object' && !Array.isArray(payload.profile)
+      ? (payload.profile as Record<string, unknown>)
+      : {};
+  const metrics =
+    payload.metrics && typeof payload.metrics === 'object' && !Array.isArray(payload.metrics)
+      ? (payload.metrics as Record<string, unknown>)
+      : {};
+
+  const capturedAt = normalizeOptionalIsoString(payload.captured_at) ?? new Date().toISOString();
+  const reason = limitText(payload.reason, 64, 'manual');
+
+  const payloadJson = JSON.stringify(payload);
+  if (typeof payloadJson !== 'string') {
+    return { ok: false, error: 'invalid_payload_json' };
+  }
+  if (payloadJson.length > 200_000) {
+    return { ok: false, error: 'payload_too_large' };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      site_url: limitText(payload.site_url, 500, ''),
+      provider_name: limitText(profile.provider_name, 160, ''),
+      region_label: limitText(profile.region_label, 160, ''),
+      virtualization_os: limitText(profile.virtualization_os, 64, ''),
+      cpu_model: limitText(profile.cpu_model, 180, ''),
+      cpu_year: limitText(profile.cpu_year, 16, ''),
+      ram_gb: limitText(profile.ram_gb, 24, ''),
+      memory_class: limitText(profile.memory_class, 24, ''),
+      webserver_type: limitText(profile.webserver_type, 40, ''),
+      storage_type: limitText(profile.storage_type, 32, ''),
+      uplink_mbps: limitText(profile.uplink_mbps, 32, ''),
+      gpu_acceleration_mode: limitText(profile.gpu_acceleration_mode, 24, ''),
+      gpu_model: limitText(profile.gpu_model, 180, ''),
+      gpu_count: limitText(profile.gpu_count, 16, ''),
+      gpu_vram_gb: limitText(profile.gpu_vram_gb, 16, ''),
+      reason,
+      captured_at: capturedAt,
+      home_ttfb_ms: nestedNumber(metrics, ['home_ttfb', 'ms']),
+      rest_ttfb_ms: nestedNumber(metrics, ['rest_ttfb', 'ms']),
+      cpu_ops_per_sec: nestedNumber(metrics, ['cpu_benchmark', 'ops_per_sec']),
+      disk_write_mb_per_sec: nestedNumber(metrics, ['disk_benchmark', 'write_mb_per_sec']),
+      disk_read_mb_per_sec: nestedNumber(metrics, ['disk_benchmark', 'read_mb_per_sec']),
+      memory_pressure_score: nestedNumber(metrics, ['memory', 'pressure_score']),
+      payload_json: payloadJson,
+    },
+  };
+}
+
+function parseGoalAssistantPayload(
+  rawBody: ArrayBuffer,
+):
+  | {
+      ok: true;
+      payload: GoalAssistantPayload;
+    }
+  | {
+      ok: false;
+      error: string;
+    } {
+  const parsedResult = parseJsonObjectBody(rawBody);
+  if (!parsedResult.ok) {
+    return parsedResult;
+  }
+  const payload = parsedResult.payload;
+
+  const siteId = typeof payload.site_id === 'string' ? payload.site_id.trim() : '';
+  const domain = typeof payload.domain === 'string' ? payload.domain.trim() : '';
+  if (siteId === '' || domain === '') {
+    return { ok: false, error: 'missing_site_or_domain' };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      site_id: siteId,
+      domain,
+      business_type: limitText(payload.business_type, 120, ''),
+      objective: limitText(payload.objective, 160, ''),
+      channels: parseStringList(payload.channels),
+      form_types: parseStringList(payload.form_types),
+      avg_lead_value: numberOrDefault(payload.avg_lead_value, 0),
+      ga4_measurement_id: limitText(payload.ga4_measurement_id, 32, ''),
+      gtm_container_id: limitText(payload.gtm_container_id, 32, ''),
     },
   };
 }
@@ -1035,6 +1307,63 @@ function normalizeOptionalIsoString(value: unknown): string | null {
     return null;
   }
   return new Date(parsedMs).toISOString();
+}
+
+function limitText(value: unknown, maxLength: number, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return fallback;
+  }
+  return trimmed.slice(0, maxLength);
+}
+
+function nestedNumber(record: Record<string, unknown>, path: string[]): number | null {
+  let cursor: unknown = record;
+  for (const key of path) {
+    if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) {
+      return null;
+    }
+    cursor = (cursor as Record<string, unknown>)[key];
+  }
+  if (typeof cursor === 'number') {
+    return Number.isFinite(cursor) ? cursor : null;
+  }
+  if (typeof cursor === 'string') {
+    const parsed = Number(cursor);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function parseStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item) => item.length > 0);
+  }
+
+  if (typeof value === 'string') {
+    return value
+      .split(/[\r\n,]+/)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  }
+
+  return [];
+}
+
+function numberOrDefault(value: unknown, fallback: number): number {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : fallback;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  return fallback;
 }
 
 function json(payload: unknown, status = 200): Response {

@@ -5,8 +5,21 @@ Repository for multiple WordPress plugins and a Cloudflare control plane.
 This repo is now organized as a multi-product suite (not web3-only):
 - `apps/webadmin-edge-agent`: production WordPress edge agent plugin.
 - `apps/control-plane-worker`: Cloudflare Worker control plane.
+- `apps/storage-anchor-worker`: policy-based R2 + B2 + IPFS storage anchor service.
+- `apps/panel-addon-core`: scaffold for non-WordPress control-panel addons.
+- `apps/ai-vps-control-panel`: AI-chat-operated VPS control-panel backend scaffold.
 - `plugins/ai-webadmin`: legacy all-in-one AI WebAdmin plugin.
 - `plugins/tolldns`: TollDNS helper plugin.
+- `plugins/ai-wp-host-optimizer`: host baseline and VPS recommendation telemetry plugin.
+- `plugins/ai-addwords-meta-plugin`: paid traffic AI orchestration + CPA/Web3 settlement plugin.
+
+## AI_WP_Plugin_Family
+
+- [AI_WP_Plugin_Family](apps/webadmin-edge-agent/readme.txt) - WebAdmin Edge Agent
+- [AI_WP_Plugin_Family](plugins/ai-webadmin/README.md) - AI WebAdmin
+- [AI_WP_Plugin_Family](plugins/tolldns/README.md) - TollDNS
+- [AI_WP_Plugin_Family](plugins/ai-wp-host-optimizer/README.md) - AI WP Host Optimizer Plugin
+- [AI_WP_Plugin_Family](plugins/ai-addwords-meta-plugin/README.md) - AI AddWords + Meta Paid Traffic Plugin
 
 ## Repository layout
 
@@ -15,13 +28,26 @@ repo/
   apps/
     webadmin-edge-agent/
     control-plane-worker/
+    storage-anchor-worker/
+    panel-addon-core/
+    ai-vps-control-panel/
   plugins/
     ai-webadmin/
     tolldns/
+    ai-wp-host-optimizer/
+    ai-addwords-meta-plugin/
   docs/
   scripts/
   update-feed/
 ```
+
+## VPS addon phase
+
+- Roadmap: `docs/vps-control-panel-addon-roadmap.md`
+- AI VPS control panel architecture: `docs/ai-vps-control-panel-architecture.md`
+- Worker now supports both route namespaces:
+  - `/plugin/wp/*` for existing WordPress agents
+  - `/plugin/site/*` for control-panel addons and non-WordPress runtimes
 
 ## Local development
 
@@ -48,6 +74,50 @@ cd apps/control-plane-worker
 npm install
 npm run dev
 ```
+
+### Panel Addon Core
+
+```bash
+cd apps/panel-addon-core
+npm install
+npm test
+npm run build
+```
+
+### AI VPS Control Panel
+
+```bash
+cd apps/ai-vps-control-panel
+npm install
+export AI_VPS_DB_PATH="./data/ai-vps-control-panel.sqlite"
+export AI_VPS_API_KEYS="admin-a:admin:tenant-a,operator-a:operator:tenant-a"
+npm test
+npm run build
+npm start
+```
+
+### Analytics OAuth + Deploy setup
+
+Set worker secrets:
+
+```bash
+cd apps/control-plane-worker
+wrangler secret put GOOGLE_CLIENT_ID
+wrangler secret put GOOGLE_CLIENT_SECRET
+wrangler secret put GOOGLE_OAUTH_REDIRECT_URI
+wrangler secret put CAP_TOKEN_ANALYTICS_WRITE
+```
+
+Worker callback:
+- `GET /oauth/google/callback`
+
+WP Admin flow:
+1. Open `WebAdmin Edge Agent -> Analytics & Reporting`.
+2. Click `Generate Analytics API Key` and copy the one-time value.
+3. Set the same value in worker secret `CAP_TOKEN_ANALYTICS_WRITE`.
+4. Use `AI Goal Assistant` to generate recommended conversion goals/events.
+5. Click `Apply Plan to Analytics Settings` to auto-fill primary/secondary conversions + funnel steps.
+6. Save GA4/GTM IDs, click `Connect Google Account`, then `Deploy GTM + GA4 Conversions`.
 
 ## Wallet login verification
 
@@ -111,7 +181,7 @@ Artifact:
 GitHub Actions workflow:
 - Runs worker tests (including Ethereum/Solana wallet-login verification path).
 - Runs WordPress edge-agent PHPUnit suite.
-- Runs PHP lint for `plugins/ai-webadmin` and `plugins/tolldns`.
+- Runs PHP lint for `plugins/ai-webadmin`, `plugins/tolldns`, and `plugins/ai-addwords-meta-plugin`.
 
 ## GitHub repo rename
 
