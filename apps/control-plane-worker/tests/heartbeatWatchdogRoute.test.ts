@@ -56,6 +56,9 @@ function baseEnv(): Env {
     WP_PLUGIN_SHARED_SECRET: 'secret',
     CAP_TOKEN_UPTIME_WRITE: 'cap-up',
     REPLAY_WINDOW_SECONDS: '300',
+    GOOGLE_CLIENT_ID: 'test-client-id',
+    GOOGLE_CLIENT_SECRET: 'test-client-secret',
+    GOOGLE_OAUTH_REDIRECT_URI: 'http://localhost/oauth/callback',
   };
 }
 

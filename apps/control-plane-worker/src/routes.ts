@@ -6,6 +6,20 @@ import { type GoalAssistantPayload } from './analytics/buildGoalAssistant';
 import { buildGoalAssistantPlanWithAI } from './analytics/buildGoalAssistantWithAI';
 import { runWatchdogLbAutomation, type WatchdogLbAutomationResult } from './automation/watchdogLbAutomation';
 import { withSiteLock } from './durable/withSiteLock';
+import { ensureGa4Conversions } from './google/ga4';
+import { deployGtm } from './google/gtm';
+import {
+  buildGoogleAuthUrl,
+  createOauthSession,
+  exchangeCodeForTokens,
+  getGoogleToken,
+  getGoogleUserEmail,
+  getOauthSession,
+  refreshGoogleAccessToken,
+  saveRefreshedAccessToken,
+  updateOauthSession,
+  upsertGoogleToken,
+} from './google/oauth';
 import { createHostOptimizerBaseline } from './hostOptimizer/store';
 import { createJob } from './jobs/createJob';
 import { heartbeatRiskScore, shouldCreateHeartbeatJob } from './policy/heartbeat';
@@ -957,7 +971,6 @@ function parseHeartbeatPayload(
 }
 
 function parseHostOptimizerBaselinePayload(
-function parseGoogleConnectStartPayload(
   rawBody: ArrayBuffer,
 ):
   | {
@@ -987,6 +1000,75 @@ function parseGoogleConnectStartPayload(
         disk_read_mb_per_sec: number | null;
         memory_pressure_score: number | null;
         payload_json: string;
+      };
+    }
+  | {
+      ok: false;
+      error: string;
+    } {
+  const parsedResult = parseJsonObjectBody(rawBody);
+  if (!parsedResult.ok) {
+    return parsedResult;
+  }
+  const payload = parsedResult.payload;
+
+  const profile =
+    payload.profile && typeof payload.profile === 'object' && !Array.isArray(payload.profile)
+      ? (payload.profile as Record<string, unknown>)
+      : {};
+  const metrics =
+    payload.metrics && typeof payload.metrics === 'object' && !Array.isArray(payload.metrics)
+      ? (payload.metrics as Record<string, unknown>)
+      : {};
+
+  const capturedAt = normalizeOptionalIsoString(payload.captured_at) ?? new Date().toISOString();
+  const reason = limitText(payload.reason, 64, 'manual');
+
+  const payloadJson = JSON.stringify(payload);
+  if (typeof payloadJson !== 'string') {
+    return { ok: false, error: 'invalid_payload_json' };
+  }
+  if (payloadJson.length > 200_000) {
+    return { ok: false, error: 'payload_too_large' };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      site_url: limitText(payload.site_url, 500, ''),
+      provider_name: limitText(profile.provider_name, 160, ''),
+      region_label: limitText(profile.region_label, 160, ''),
+      virtualization_os: limitText(profile.virtualization_os, 64, ''),
+      cpu_model: limitText(profile.cpu_model, 180, ''),
+      cpu_year: limitText(profile.cpu_year, 16, ''),
+      ram_gb: limitText(profile.ram_gb, 24, ''),
+      memory_class: limitText(profile.memory_class, 24, ''),
+      webserver_type: limitText(profile.webserver_type, 40, ''),
+      storage_type: limitText(profile.storage_type, 32, ''),
+      uplink_mbps: limitText(profile.uplink_mbps, 32, ''),
+      gpu_acceleration_mode: limitText(profile.gpu_acceleration_mode, 24, ''),
+      gpu_model: limitText(profile.gpu_model, 180, ''),
+      gpu_count: limitText(profile.gpu_count, 16, ''),
+      gpu_vram_gb: limitText(profile.gpu_vram_gb, 16, ''),
+      reason,
+      captured_at: capturedAt,
+      home_ttfb_ms: nestedNumber(metrics, ['home_ttfb', 'ms']),
+      rest_ttfb_ms: nestedNumber(metrics, ['rest_ttfb', 'ms']),
+      cpu_ops_per_sec: nestedNumber(metrics, ['cpu_benchmark', 'ops_per_sec']),
+      disk_write_mb_per_sec: nestedNumber(metrics, ['disk_benchmark', 'write_mb_per_sec']),
+      disk_read_mb_per_sec: nestedNumber(metrics, ['disk_benchmark', 'read_mb_per_sec']),
+      memory_pressure_score: nestedNumber(metrics, ['memory', 'pressure_score']),
+      payload_json: payloadJson,
+    },
+  };
+}
+
+function parseGoogleConnectStartPayload(
+  rawBody: ArrayBuffer,
+):
+  | {
+      ok: true;
+      payload: {
         site_id: string;
         return_url: string;
       };
@@ -1012,6 +1094,45 @@ function parseGoogleConnectStartPayload(
     payload: {
       site_id: siteId,
       return_url: returnUrl,
+    },
+  };
+}
+
+function parseGoalAssistantPayload(
+  rawBody: ArrayBuffer,
+):
+  | {
+      ok: true;
+      payload: GoalAssistantPayload;
+    }
+  | {
+      ok: false;
+      error: string;
+    } {
+  const parsedResult = parseJsonObjectBody(rawBody);
+  if (!parsedResult.ok) {
+    return parsedResult;
+  }
+  const payload = parsedResult.payload;
+
+  const siteId = typeof payload.site_id === 'string' ? payload.site_id.trim() : '';
+  const domain = typeof payload.domain === 'string' ? payload.domain.trim() : '';
+  if (siteId === '' || domain === '') {
+    return { ok: false, error: 'missing_site_or_domain' };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      site_id: siteId,
+      domain,
+      business_type: limitText(payload.business_type, 120, ''),
+      objective: limitText(payload.objective, 160, ''),
+      channels: parseStringList(payload.channels),
+      form_types: parseStringList(payload.form_types),
+      avg_lead_value: numberOrDefault(payload.avg_lead_value, 0),
+      ga4_measurement_id: limitText(payload.ga4_measurement_id, 32, ''),
+      gtm_container_id: limitText(payload.gtm_container_id, 32, ''),
     },
   };
 }
@@ -1052,7 +1173,17 @@ function parseGoogleDeployPayload(
 ):
   | {
       ok: true;
-      payload: GoalAssistantPayload;
+      payload: {
+        site_id: string;
+        ga4_measurement_id: string;
+        ga4_property_id: string;
+        gtm_account_id: string;
+        gtm_container_id: string;
+        gtm_workspace_name: string;
+        primary_conversion: string;
+        secondary_conversions: string[];
+        dry_run: boolean;
+      };
     }
   | {
       ok: false;
@@ -1665,6 +1796,59 @@ function ensureGoogleOauthConfig(env: Env): string | null {
   }
 
   return null;
+}
+
+function limitText(value: unknown, maxLength: number, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return fallback;
+  }
+  return trimmed.slice(0, maxLength);
+}
+
+function nestedNumber(record: Record<string, unknown>, path: string[]): number | null {
+  let cursor: unknown = record;
+  for (const key of path) {
+    if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) {
+      return null;
+    }
+    cursor = (cursor as Record<string, unknown>)[key];
+  }
+  if (typeof cursor === 'number') {
+    return Number.isFinite(cursor) ? cursor : null;
+  }
+  if (typeof cursor === 'string') {
+    const parsed = Number(cursor);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function numberOrDefault(value: unknown, fallback: number): number {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : fallback;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  return fallback;
+}
+
+function optionalFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
 }
 
 function json(payload: unknown, status = 200): Response {
