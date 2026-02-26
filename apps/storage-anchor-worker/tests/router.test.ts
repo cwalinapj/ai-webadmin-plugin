@@ -7,35 +7,35 @@ import type { Env } from '../src/types';
 // ---------------------------------------------------------------------------
 
 vi.mock('../src/db/store', () => ({
-  findAnchorObjectByKey: vi.fn(),
-  findAnchorObjectById: vi.fn(),
-  findTaskWithObjectById: vi.fn(),
+  countPendingTasks: vi.fn(),
   createAnchorObject: vi.fn(),
   createAnchorTask: vi.fn(),
-  touchObjectAccess: vi.fn(),
-  countPendingTasks: vi.fn(),
+  findAnchorObjectById: vi.fn(),
+  findAnchorObjectByKey: vi.fn(),
+  findTaskWithObjectById: vi.fn(),
   getIpfsUsedBytes: vi.fn(),
-  updateTaskState: vi.fn(),
   markObjectLocation: vi.fn(),
-}));
-
-vi.mock('../src/providers/r2', () => ({
-  putToR2: vi.fn(),
-  getFromR2: vi.fn(),
+  touchObjectAccess: vi.fn(),
+  updateTaskState: vi.fn(),
 }));
 
 vi.mock('../src/providers/b2', () => ({
-  putToB2: vi.fn(),
   getFromB2: vi.fn(),
-  isB2Configured: vi.fn(() => false),
+  putToB2: vi.fn(),
+}));
+
+vi.mock('../src/providers/r2', () => ({
+  getFromR2: vi.fn(),
+  putToR2: vi.fn(),
 }));
 
 vi.mock('../src/providers/ipfs', () => ({
+  isIpfsConfigured: vi.fn().mockReturnValue(false),
   pinToIpfs: vi.fn(),
-  isIpfsConfigured: vi.fn(() => false),
 }));
 
 import * as store from '../src/db/store';
+import * as b2 from '../src/providers/b2';
 import * as r2 from '../src/providers/r2';
 import * as ipfs from '../src/providers/ipfs';
 
@@ -43,14 +43,15 @@ import * as ipfs from '../src/providers/ipfs';
 // Helpers
 // ---------------------------------------------------------------------------
 
+const VALID_TOKEN = 'test-token-abc';
+const CONTENT_BASE64 = btoa('hello world'); // "aGVsbG8gd29ybGQ="
+
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
-    ANCHOR_API_TOKEN: 'test-token',
-    ANCHOR_DB: {} as D1Database,
-    ANCHOR_R2: {} as R2Bucket,
-    ANCHOR_QUEUE: {
-      send: vi.fn().mockResolvedValue(undefined),
-    } as unknown as Queue,
+    ANCHOR_API_TOKEN: VALID_TOKEN,
+    ANCHOR_DB: {} as Env['ANCHOR_DB'],
+    ANCHOR_QUEUE: { send: vi.fn() } as unknown as Env['ANCHOR_QUEUE'],
+    ANCHOR_R2: {} as Env['ANCHOR_R2'],
     ...overrides,
   };
 }
@@ -376,41 +377,56 @@ describe('processAnchorTask – task retry / state changes', () => {
     );
   });
 
-  it('queues retry on first failure (attempts < 3)', async () => {
-    vi.mocked(store.findTaskWithObjectById).mockResolvedValue(makeTaskEntry() as any);
-    vi.mocked(r2.getFromR2).mockRejectedValue(new Error('r2_error'));
+  it('retries task (queues again) on first failure', async () => {
+    vi.mocked(store.findTaskWithObjectById).mockResolvedValue({
+      task: makeTask({ target_provider: 'r2', attempts: 0 }),
+      object: makeObjectRecord({ primary_provider: 'r2', r2_key: 'test/key.txt' }),
+    });
+    vi.mocked(r2.getFromR2).mockRejectedValue(new Error('r2_unavailable'));
+    vi.mocked(store.updateTaskState).mockResolvedValue(undefined);
+    vi.mocked(store.markObjectLocation).mockResolvedValue(undefined);
 
-    const sendMock = vi.fn().mockResolvedValue(undefined);
-    env = makeEnv({ ANCHOR_QUEUE: { send: sendMock } as unknown as Queue });
-
+    const queueSendMock = vi.fn();
+    const env = makeEnv({ ANCHOR_QUEUE: { send: queueSendMock } as unknown as Env['ANCHOR_QUEUE'] });
     await processAnchorTask(env, 'task-1');
 
-    // Should re-queue with delay
-    expect(sendMock).toHaveBeenCalledWith({ taskId: 'task-1' }, { delaySeconds: 30 });
-    // Should set status back to queued (retry)
+    // After attempt 1 (< 3), should be re-queued
     expect(store.updateTaskState).toHaveBeenCalledWith(
-      env.ANCHOR_DB, 'task-1', 'queued', 1, expect.any(String),
+      expect.anything(),
+      'task-1',
+      'queued',
+      1,
+      expect.stringContaining('r2_unavailable'),
     );
+    expect(queueSendMock).toHaveBeenCalledWith({ taskId: 'task-1' }, expect.objectContaining({ delaySeconds: 30 }));
   });
 
-  it('marks task failed after exhausting retries (attempt >= 3)', async () => {
-    vi.mocked(store.findTaskWithObjectById).mockResolvedValue(
-      makeTaskEntry({ attempts: 2 }) as any,
-    );
+  it('marks task failed after max attempts exceeded', async () => {
+    vi.mocked(store.findTaskWithObjectById).mockResolvedValue({
+      task: makeTask({ target_provider: 'r2', attempts: 2 }), // attempt 3 will be the next
+      object: makeObjectRecord({ primary_provider: 'r2', r2_key: 'test/key.txt' }),
+    });
     vi.mocked(r2.getFromR2).mockRejectedValue(new Error('persistent_error'));
+    vi.mocked(store.updateTaskState).mockResolvedValue(undefined);
+    vi.mocked(store.markObjectLocation).mockResolvedValue(undefined);
 
+    const queueSendMock = vi.fn();
+    const env = makeEnv({ ANCHOR_QUEUE: { send: queueSendMock } as unknown as Env['ANCHOR_QUEUE'] });
     await processAnchorTask(env, 'task-1');
 
+    // attempt 3 >= 3, so should be marked failed, not re-queued
     expect(store.updateTaskState).toHaveBeenCalledWith(
-      env.ANCHOR_DB, 'task-1', 'failed', 3, expect.any(String),
+      expect.anything(),
+      'task-1',
+      'failed',
+      3,
+      expect.stringContaining('persistent_error'),
     );
     expect(store.markObjectLocation).toHaveBeenCalledWith(
-      env.ANCHOR_DB,
+      expect.anything(),
       'obj-1',
       expect.objectContaining({ status: 'failed' }),
     );
-    // Should NOT re-queue
-    const queueSend = vi.mocked(env.ANCHOR_QUEUE.send);
-    expect(queueSend).not.toHaveBeenCalled();
+    expect(queueSendMock).not.toHaveBeenCalled();
   });
 });
