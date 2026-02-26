@@ -160,7 +160,7 @@ class Menu
         $response = $this->analyticsGoogle->startConnect($returnUrl);
 
         if (!empty($response['ok']) && isset($response['body']['auth_url'])) {
-            wp_safe_redirect(esc_url_raw((string)$response['body']['auth_url']));
+            wp_redirect(esc_url_raw((string)$response['body']['auth_url']));
             exit;
         }
 

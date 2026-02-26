@@ -1,6 +1,7 @@
 export interface SignatureEnv {
   WP_PLUGIN_SHARED_SECRET: string;
   CAP_TOKEN_UPTIME_WRITE: string;
+  CAP_TOKEN_ANALYTICS_WRITE?: string;
   CAP_TOKEN_SANDBOX_WRITE?: string;
   REPLAY_WINDOW_SECONDS?: string;
 }
@@ -142,6 +143,19 @@ function verifyCapabilityToken(
       return { ok: false, status: 403, error: 'missing_capability_token' };
     }
     if (!timingSafeEqual(token, env.CAP_TOKEN_UPTIME_WRITE)) {
+      return { ok: false, status: 403, error: 'invalid_capability_token' };
+    }
+  }
+
+  if (path.startsWith('/plugin/wp/analytics/')) {
+    if (!env.CAP_TOKEN_ANALYTICS_WRITE) {
+      return { ok: false, status: 500, error: 'worker_missing_analytics_capability_token' };
+    }
+    const token = tokenHeader?.trim() ?? '';
+    if (token === '') {
+      return { ok: false, status: 403, error: 'missing_capability_token' };
+    }
+    if (!timingSafeEqual(token, env.CAP_TOKEN_ANALYTICS_WRITE)) {
       return { ok: false, status: 403, error: 'invalid_capability_token' };
     }
   }

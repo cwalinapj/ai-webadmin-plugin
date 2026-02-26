@@ -49,6 +49,19 @@ npm install
 npm run dev
 ```
 
+Set required secrets/vars for Google OAuth + deploy:
+
+```bash
+cd apps/control-plane-worker
+wrangler secret put GOOGLE_CLIENT_ID
+wrangler secret put GOOGLE_CLIENT_SECRET
+wrangler secret put GOOGLE_OAUTH_REDIRECT_URI
+wrangler secret put CAP_TOKEN_ANALYTICS_WRITE
+```
+
+OAuth callback route:
+- `GET /oauth/google/callback`
+
 ## Wallet login verification
 
 `plugins/ai-webadmin` now supports wallet-signature login for:
@@ -79,6 +92,21 @@ Selection order is weighted by:
 Claims are serialized with a Durable Object lock so multiple agents do not claim the same sandbox slot.
 Agents can also share a conflict pool for blocked work, read active conflicts, and resolve/dismiss them after remediation.
 All sandbox routes use signed plugin auth and require capability token `CAP_TOKEN_SANDBOX_WRITE`.
+
+## Analytics Google deploy (OAuth + one-click conversions)
+
+New worker routes:
+- `POST /plugin/wp/analytics/google/connect/start`
+- `POST /plugin/wp/analytics/google/status`
+- `POST /plugin/wp/analytics/google/deploy`
+- `GET /oauth/google/callback`
+
+Plugin tab:
+- `Analytics & Reporting` now supports:
+  - Connect Google account (OAuth)
+  - Save GA4/GTM IDs + analytics capability token
+  - One-click deploy for GTM tags/triggers and GA4 conversions
+  - Optional GTM snippet + conversion event bridge injection
 
 ## Tests
 

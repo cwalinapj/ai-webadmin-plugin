@@ -3,6 +3,20 @@ import { consumeIdempotencyKey, consumeNonce } from './auth/replay';
 import { verifySignedRequest } from './auth/verifySignature';
 import { verifyWalletChallenge, type WalletVerifyPayload } from './auth/verifyWallet';
 import { withSiteLock } from './durable/withSiteLock';
+import { ensureGa4Conversions } from './google/ga4';
+import { deployGtm } from './google/gtm';
+import {
+  buildGoogleAuthUrl,
+  createOauthSession,
+  exchangeCodeForTokens,
+  getGoogleToken,
+  getGoogleUserEmail,
+  getOauthSession,
+  refreshGoogleAccessToken,
+  saveRefreshedAccessToken,
+  updateOauthSession,
+  upsertGoogleToken,
+} from './google/oauth';
 import { createJob } from './jobs/createJob';
 import { heartbeatRiskScore, shouldCreateHeartbeatJob } from './policy/heartbeat';
 import { enqueueJob } from './queue/publish';
@@ -28,6 +42,22 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
   if (request.method === 'POST' && url.pathname === '/plugin/wp/watchdog/heartbeat') {
     return handleHeartbeat(request, env, url.pathname);
+  }
+
+  if (request.method === 'POST' && url.pathname === '/plugin/wp/analytics/google/connect/start') {
+    return handleGoogleConnectStart(request, env, url.pathname);
+  }
+
+  if (request.method === 'POST' && url.pathname === '/plugin/wp/analytics/google/status') {
+    return handleGoogleStatus(request, env, url.pathname);
+  }
+
+  if (request.method === 'POST' && url.pathname === '/plugin/wp/analytics/google/deploy') {
+    return handleGoogleDeploy(request, env, url.pathname);
+  }
+
+  if (request.method === 'GET' && url.pathname === '/oauth/google/callback') {
+    return handleGoogleCallback(request, env);
   }
 
   if (request.method === 'POST' && url.pathname === '/plugin/wp/auth/wallet/verify') {
@@ -122,6 +152,241 @@ async function handleHeartbeat(request: Request, env: Env, path: string): Promis
   }
 
   return json({ ok: true, commands: [{ type: 'noop' }] }, 200);
+}
+
+async function handleGoogleConnectStart(
+  request: Request,
+  env: Env,
+  path: string,
+): Promise<Response> {
+  const oauthConfigError = ensureGoogleOauthConfig(env);
+  if (oauthConfigError) {
+    return json({ ok: false, error: oauthConfigError }, 500);
+  }
+
+  const auth = await authorizeSignedMutation(request, env, path);
+  if (!auth.authorized) {
+    return auth.response;
+  }
+
+  const payloadResult = parseGoogleConnectStartPayload(auth.rawBody);
+  if (!payloadResult.ok) {
+    return json({ ok: false, error: payloadResult.error }, 400);
+  }
+
+  if (payloadResult.payload.site_id === '') {
+    return json({ ok: false, error: 'missing_site_id' }, 400);
+  }
+
+  const sessionId = await createOauthSession(env.DB, {
+    pluginId: auth.pluginId,
+    siteId: payloadResult.payload.site_id,
+    returnUrl: payloadResult.payload.return_url,
+  });
+  const authUrl = buildGoogleAuthUrl(env, sessionId);
+
+  return json(
+    {
+      ok: true,
+      session_id: sessionId,
+      auth_url: authUrl,
+      commands: [{ type: 'noop' }],
+    },
+    200,
+  );
+}
+
+async function handleGoogleCallback(request: Request, env: Env): Promise<Response> {
+  const oauthConfigError = ensureGoogleOauthConfig(env);
+  if (oauthConfigError) {
+    return json({ ok: false, error: oauthConfigError }, 500);
+  }
+
+  const url = new URL(request.url);
+  const state = (url.searchParams.get('state') ?? '').trim();
+  const code = (url.searchParams.get('code') ?? '').trim();
+  const oauthError = (url.searchParams.get('error') ?? '').trim();
+  if (state === '') {
+    return json({ ok: false, error: 'missing_state' }, 400);
+  }
+
+  const session = await getOauthSession(env.DB, state);
+  if (!session) {
+    return json({ ok: false, error: 'session_not_found' }, 404);
+  }
+
+  if (oauthError !== '') {
+    await updateOauthSession(env.DB, session.id, 'error', oauthError);
+    return createReturnRedirect(session.return_url, { awp_google_error: oauthError });
+  }
+
+  if (code === '') {
+    await updateOauthSession(env.DB, session.id, 'error', 'missing_code');
+    return createReturnRedirect(session.return_url, { awp_google_error: 'missing_code' });
+  }
+
+  try {
+    const exchanged = await exchangeCodeForTokens(env, code);
+    await upsertGoogleToken(env.DB, {
+      siteId: session.site_id,
+      pluginId: session.plugin_id,
+      refreshToken: exchanged.refreshToken,
+      accessToken: exchanged.accessToken,
+      scope: exchanged.scope,
+      tokenType: exchanged.tokenType,
+      expiresAt: exchanged.expiresAt,
+    });
+    await updateOauthSession(env.DB, session.id, 'connected', null);
+    return createReturnRedirect(session.return_url, { awp_google_connected: '1' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'oauth_exchange_failed';
+    await updateOauthSession(env.DB, session.id, 'error', message);
+    return createReturnRedirect(session.return_url, { awp_google_error: message });
+  }
+}
+
+async function handleGoogleStatus(request: Request, env: Env, path: string): Promise<Response> {
+  const auth = await authorizeSignedMutation(request, env, path);
+  if (!auth.authorized) {
+    return auth.response;
+  }
+
+  const payloadResult = parseGoogleStatusPayload(auth.rawBody);
+  if (!payloadResult.ok) {
+    return json({ ok: false, error: payloadResult.error }, 400);
+  }
+
+  const token = await getGoogleToken(env.DB, payloadResult.payload.site_id);
+  if (!token || token.plugin_id !== auth.pluginId) {
+    return json(
+      {
+        ok: true,
+        connected: false,
+        email: '',
+        commands: [{ type: 'noop' }],
+      },
+      200,
+    );
+  }
+
+  try {
+    const accessToken = await ensureGoogleAccessToken(env, token);
+    const email = await getGoogleUserEmail(accessToken);
+
+    return json(
+      {
+        ok: true,
+        connected: true,
+        email,
+        commands: [{ type: 'noop' }],
+      },
+      200,
+    );
+  } catch (error) {
+    return json(
+      {
+        ok: true,
+        connected: false,
+        email: '',
+        error: error instanceof Error ? error.message : 'google_token_error',
+        commands: [{ type: 'noop' }],
+      },
+      200,
+    );
+  }
+}
+
+async function handleGoogleDeploy(request: Request, env: Env, path: string): Promise<Response> {
+  const auth = await authorizeSignedMutation(request, env, path);
+  if (!auth.authorized) {
+    return auth.response;
+  }
+
+  const payloadResult = parseGoogleDeployPayload(auth.rawBody);
+  if (!payloadResult.ok) {
+    return json({ ok: false, error: payloadResult.error }, 400);
+  }
+  const payload = payloadResult.payload;
+
+  const token = await getGoogleToken(env.DB, payload.site_id);
+  if (!token || token.plugin_id !== auth.pluginId) {
+    return json({ ok: false, error: 'google_not_connected' }, 409);
+  }
+
+  const uniqueConversionEvents = mergeConversionEvents(
+    payload.primary_conversion,
+    payload.secondary_conversions,
+  );
+
+  try {
+    const output = await withSiteLock(env.SITE_LOCK, payload.site_id, async () => {
+      const accessToken = await ensureGoogleAccessToken(env, token);
+      if (payload.dry_run) {
+        return {
+          dry_run: true,
+          events: uniqueConversionEvents,
+          gtm: {
+            status: 'skipped',
+            reason: 'dry_run',
+          },
+          ga4: {
+            status: 'skipped',
+            reason: 'dry_run',
+          },
+        };
+      }
+
+      const [gtmResult, ga4Result] = await Promise.all([
+        deployGtm(accessToken, {
+          gtmAccountId: payload.gtm_account_id,
+          gtmContainerId: payload.gtm_container_id,
+          gtmWorkspaceName: payload.gtm_workspace_name,
+          ga4MeasurementId: payload.ga4_measurement_id,
+          conversionEvents: uniqueConversionEvents,
+        }),
+        ensureGa4Conversions(accessToken, payload.ga4_property_id, uniqueConversionEvents),
+      ]);
+
+      return {
+        dry_run: false,
+        events: uniqueConversionEvents,
+        gtm: gtmResult,
+        ga4: ga4Result,
+      };
+    });
+
+    await createJob(env.DB, {
+      siteId: payload.site_id,
+      tab: 'analytics',
+      type: 'google_deploy',
+      status: payload.dry_run ? 'dry_run' : 'completed',
+      riskScore: 0,
+    });
+
+    return json(
+      {
+        ok: true,
+        deploy: output,
+        commands: [{ type: 'noop' }],
+      },
+      200,
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message === 'site_lock_acquire_failed') {
+      return json({ ok: false, error: 'site_lock_unavailable' }, 409);
+    }
+
+    const message = error instanceof Error ? error.message : 'google_deploy_failed';
+    await createJob(env.DB, {
+      siteId: payload.site_id,
+      tab: 'analytics',
+      type: 'google_deploy',
+      status: 'failed',
+      riskScore: 0.7,
+    });
+
+    return json({ ok: false, error: message }, 500);
+  }
 }
 
 async function handleWalletVerify(request: Request, env: Env): Promise<Response> {
@@ -567,6 +832,132 @@ function parseHeartbeatPayload(
             )
           : {},
       site_url: typeof payload.site_url === 'string' ? payload.site_url : '',
+    },
+  };
+}
+
+function parseGoogleConnectStartPayload(
+  rawBody: ArrayBuffer,
+):
+  | {
+      ok: true;
+      payload: {
+        site_id: string;
+        return_url: string;
+      };
+    }
+  | {
+      ok: false;
+      error: string;
+    } {
+  const parsedResult = parseJsonObjectBody(rawBody);
+  if (!parsedResult.ok) {
+    return parsedResult;
+  }
+  const payload = parsedResult.payload;
+
+  const siteId = typeof payload.site_id === 'string' ? payload.site_id.trim() : '';
+  const returnUrl = typeof payload.return_url === 'string' ? payload.return_url.trim() : '';
+  if (siteId === '' || returnUrl === '') {
+    return { ok: false, error: 'missing_site_or_return_url' };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      site_id: siteId,
+      return_url: returnUrl,
+    },
+  };
+}
+
+function parseGoogleStatusPayload(
+  rawBody: ArrayBuffer,
+):
+  | {
+      ok: true;
+      payload: {
+        site_id: string;
+      };
+    }
+  | {
+      ok: false;
+      error: string;
+    } {
+  const parsedResult = parseJsonObjectBody(rawBody);
+  if (!parsedResult.ok) {
+    return parsedResult;
+  }
+  const payload = parsedResult.payload;
+  const siteId = typeof payload.site_id === 'string' ? payload.site_id.trim() : '';
+  if (siteId === '') {
+    return { ok: false, error: 'missing_site_id' };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      site_id: siteId,
+    },
+  };
+}
+
+function parseGoogleDeployPayload(
+  rawBody: ArrayBuffer,
+):
+  | {
+      ok: true;
+      payload: {
+        site_id: string;
+        ga4_measurement_id: string;
+        ga4_property_id: string;
+        gtm_account_id: string;
+        gtm_container_id: string;
+        gtm_workspace_name: string;
+        primary_conversion: string;
+        secondary_conversions: string[];
+        dry_run: boolean;
+      };
+    }
+  | {
+      ok: false;
+      error: string;
+    } {
+  const parsedResult = parseJsonObjectBody(rawBody);
+  if (!parsedResult.ok) {
+    return parsedResult;
+  }
+  const payload = parsedResult.payload;
+  const siteId = typeof payload.site_id === 'string' ? payload.site_id.trim() : '';
+  if (siteId === '') {
+    return { ok: false, error: 'missing_site_id' };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      site_id: siteId,
+      ga4_measurement_id:
+        typeof payload.ga4_measurement_id === 'string' ? payload.ga4_measurement_id.trim() : '',
+      ga4_property_id:
+        typeof payload.ga4_property_id === 'string' ? payload.ga4_property_id.trim() : '',
+      gtm_account_id: typeof payload.gtm_account_id === 'string' ? payload.gtm_account_id.trim() : '',
+      gtm_container_id:
+        typeof payload.gtm_container_id === 'string' ? payload.gtm_container_id.trim() : '',
+      gtm_workspace_name:
+        typeof payload.gtm_workspace_name === 'string' && payload.gtm_workspace_name.trim() !== ''
+          ? payload.gtm_workspace_name.trim()
+          : 'WebAdmin Auto',
+      primary_conversion:
+        typeof payload.primary_conversion === 'string' && payload.primary_conversion.trim() !== ''
+          ? payload.primary_conversion.trim()
+          : 'lead_submit',
+      secondary_conversions: parseStringList(payload.secondary_conversions),
+      dry_run:
+        payload.dry_run === true ||
+        (typeof payload.dry_run === 'string' && payload.dry_run.trim().toLowerCase() === 'true') ||
+        payload.dry_run === 1 ||
+        payload.dry_run === '1',
     },
   };
 }
@@ -1035,6 +1426,110 @@ function normalizeOptionalIsoString(value: unknown): string | null {
     return null;
   }
   return new Date(parsedMs).toISOString();
+}
+
+function parseStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item) => item.length > 0);
+  }
+
+  if (typeof value === 'string') {
+    return value
+      .split(/[\r\n,]+/)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  }
+
+  return [];
+}
+
+function mergeConversionEvents(primary: string, secondary: string[]): string[] {
+  const values = [primary, ...secondary];
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const normalized = normalizeEventName(value);
+    if (normalized === '' || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  }
+
+  if (result.length === 0) {
+    return ['lead_submit'];
+  }
+
+  return result;
+}
+
+function normalizeEventName(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+async function ensureGoogleAccessToken(
+  env: Env,
+  token: {
+    site_id: string;
+    refresh_token: string;
+    access_token: string | null;
+    scope: string | null;
+    token_type: string | null;
+    expires_at: string | null;
+  },
+): Promise<string> {
+  const now = Date.now();
+  const expiresAtMs = token.expires_at ? Date.parse(token.expires_at) : NaN;
+  const hasValidAccessToken =
+    typeof token.access_token === 'string' &&
+    token.access_token.trim() !== '' &&
+    Number.isFinite(expiresAtMs) &&
+    expiresAtMs - now > 60_000;
+  if (hasValidAccessToken) {
+    return token.access_token as string;
+  }
+
+  const refreshed = await refreshGoogleAccessToken(env, token.refresh_token);
+  await saveRefreshedAccessToken(env.DB, {
+    siteId: token.site_id,
+    accessToken: refreshed.accessToken,
+    scope: refreshed.scope,
+    tokenType: refreshed.tokenType,
+    expiresAt: refreshed.expiresAt,
+  });
+  return refreshed.accessToken;
+}
+
+function createReturnRedirect(returnUrl: string, params: Record<string, string>): Response {
+  try {
+    const target = new URL(returnUrl);
+    for (const [key, value] of Object.entries(params)) {
+      target.searchParams.set(key, value);
+    }
+    return Response.redirect(target.toString(), 302);
+  } catch {
+    return json({ ok: false, error: 'invalid_return_url' }, 400);
+  }
+}
+
+function ensureGoogleOauthConfig(env: Env): string | null {
+  if (!env.GOOGLE_CLIENT_ID || env.GOOGLE_CLIENT_ID.trim() === '') {
+    return 'missing_google_client_id';
+  }
+  if (!env.GOOGLE_CLIENT_SECRET || env.GOOGLE_CLIENT_SECRET.trim() === '') {
+    return 'missing_google_client_secret';
+  }
+  if (!env.GOOGLE_OAUTH_REDIRECT_URI || env.GOOGLE_OAUTH_REDIRECT_URI.trim() === '') {
+    return 'missing_google_oauth_redirect_uri';
+  }
+
+  return null;
 }
 
 function json(payload: unknown, status = 200): Response {
