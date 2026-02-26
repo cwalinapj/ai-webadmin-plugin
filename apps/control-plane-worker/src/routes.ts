@@ -1888,7 +1888,7 @@ function json(payload: unknown, status = 200): Response {
   });
 }
 
-function normalizeErrorPayload(payload: unknown, status: number): unknown {
+export function normalizeErrorPayload(payload: unknown, status: number): unknown {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return payload;
   }
@@ -1925,7 +1925,7 @@ function normalizeErrorPayload(payload: unknown, status: number): unknown {
   return normalized;
 }
 
-function defaultErrorMessage(errorCode: string, status: number): string {
+export function defaultErrorMessage(errorCode: string, status: number): string {
   if (status === 401) {
     return 'Authentication failed.';
   }
