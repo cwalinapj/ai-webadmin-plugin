@@ -7,6 +7,8 @@ This repo is now organized as a multi-product suite (not web3-only):
 - `apps/control-plane-worker`: Cloudflare Worker control plane.
 - `plugins/ai-webadmin`: legacy all-in-one AI WebAdmin plugin.
 - [`plugins/tolldns`](plugins/tolldns/README.md): TollDNS helper plugin — part of the [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-) platform.
+- [`plugins/toll-comments`](plugins/toll-comments/README.md): DDNS Toll Comments — refundable credit-based comment spam protection (merged from [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-)).
+- [`plugins/wp-optin`](plugins/wp-optin/README.md): DDNS Opt-in — connect a WordPress site to the DECENTRALIZED-DNS control plane (merged from [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-)).
 
 ## Repository layout
 
@@ -18,6 +20,8 @@ repo/
   plugins/
     ai-webadmin/
     tolldns/
+    toll-comments/
+    wp-optin/
   docs/
   scripts/
   update-feed/
@@ -125,6 +129,13 @@ composer install
 composer test
 ```
 
+### Toll Comments PHP tests
+
+```bash
+cd plugins/toll-comments
+phpunit
+```
+
 ## Build installable edge-agent zip
 
 ```bash
@@ -139,7 +150,7 @@ Artifact:
 GitHub Actions workflow:
 - Runs worker tests (including Ethereum/Solana wallet-login verification path).
 - Runs WordPress edge-agent PHPUnit suite.
-- Runs PHP lint for `plugins/ai-webadmin` and `plugins/tolldns`.
+- Runs PHP lint for `plugins/ai-webadmin`, `plugins/tolldns`, `plugins/toll-comments`, and `plugins/wp-optin`.
 
 ## GitHub repo rename
 
