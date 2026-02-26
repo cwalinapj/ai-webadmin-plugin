@@ -1888,7 +1888,7 @@ function json(payload: unknown, status = 200): Response {
   });
 }
 
-function normalizeErrorPayload(payload: unknown, status: number): unknown {
+export function normalizeErrorPayload(payload: unknown, status: number): unknown {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return payload;
   }
