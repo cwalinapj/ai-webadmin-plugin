@@ -111,7 +111,20 @@ class Dispatcher
 
     private function isDestructive(string $type): bool
     {
-        return in_array($type, ['deactivate_plugin', 'apply_dns_fix', 'remediate_security'], true);
+        return in_array(
+            $type,
+            [
+                'deactivate_plugin',
+                'apply_dns_fix',
+                'remediate_security',
+                'run_canary_optimization',
+                'rollback_optimization',
+                'stage_update',
+                'execute_update_batch',
+                'rollback_update',
+            ],
+            true
+        );
     }
 
     /**
@@ -125,6 +138,11 @@ class Dispatcher
             'deactivate_plugin',
             'apply_dns_fix',
             'remediate_security',
+            'run_canary_optimization',
+            'rollback_optimization',
+            'stage_update',
+            'execute_update_batch',
+            'rollback_update',
         ];
     }
 }

@@ -32,6 +32,14 @@ class Options
             'last_heartbeat_at' => 0,
             'last_heartbeat_status' => 'never',
             'last_heartbeat_message' => '',
+            'performance_slo_goal_guest_p95_ttfb_ms' => 300.0,
+            'performance_slo_goal_error_rate_pct' => 0.1,
+            'performance_slo_goal_cache_hit_pct' => 85.0,
+            'performance_slo_dry_run' => 1,
+            'performance_slo_last_status' => 'never',
+            'performance_slo_last_message' => '',
+            'performance_slo_last_at' => 0,
+            'performance_slo_last_result_json' => '',
             'ga4_measurement_id' => '',
             'ga4_property_id' => '',
             'gtm_account_id' => '',
@@ -63,6 +71,16 @@ class Options
             'analytics_google_last_deploy_status' => 'never',
             'analytics_google_last_deploy_message' => '',
             'analytics_google_last_deploy_at' => 0,
+            'safe_updates_include_core' => 1,
+            'safe_updates_include_plugins' => 1,
+            'safe_updates_include_themes' => 0,
+            'safe_updates_plugin_allowlist' => '',
+            'safe_updates_theme_allowlist' => '',
+            'safe_updates_dry_run' => 1,
+            'safe_updates_last_status' => 'never',
+            'safe_updates_last_message' => '',
+            'safe_updates_last_at' => 0,
+            'safe_updates_last_result_json' => '',
         ];
     }
 
@@ -106,6 +124,30 @@ class Options
             'last_heartbeat_at' => (int)$current['last_heartbeat_at'],
             'last_heartbeat_status' => sanitize_text_field((string)$current['last_heartbeat_status']),
             'last_heartbeat_message' => sanitize_text_field((string)$current['last_heartbeat_message']),
+            'performance_slo_goal_guest_p95_ttfb_ms' => isset($input['performance_slo_goal_guest_p95_ttfb_ms'])
+                ? $this->normalizeFloat($input['performance_slo_goal_guest_p95_ttfb_ms'], 1, 10000, 300.0)
+                : (float)$current['performance_slo_goal_guest_p95_ttfb_ms'],
+            'performance_slo_goal_error_rate_pct' => isset($input['performance_slo_goal_error_rate_pct'])
+                ? $this->normalizeFloat($input['performance_slo_goal_error_rate_pct'], 0.001, 100, 0.1)
+                : (float)$current['performance_slo_goal_error_rate_pct'],
+            'performance_slo_goal_cache_hit_pct' => isset($input['performance_slo_goal_cache_hit_pct'])
+                ? $this->normalizeFloat($input['performance_slo_goal_cache_hit_pct'], 1, 100, 85.0)
+                : (float)$current['performance_slo_goal_cache_hit_pct'],
+            'performance_slo_dry_run' => isset($input['performance_slo_dry_run'])
+                ? $this->normalizeBoolean($input['performance_slo_dry_run'])
+                : (int)$current['performance_slo_dry_run'],
+            'performance_slo_last_status' => isset($input['performance_slo_last_status'])
+                ? sanitize_text_field((string)$input['performance_slo_last_status'])
+                : (string)$current['performance_slo_last_status'],
+            'performance_slo_last_message' => isset($input['performance_slo_last_message'])
+                ? sanitize_text_field((string)$input['performance_slo_last_message'])
+                : (string)$current['performance_slo_last_message'],
+            'performance_slo_last_at' => isset($input['performance_slo_last_at'])
+                ? (int)$input['performance_slo_last_at']
+                : (int)$current['performance_slo_last_at'],
+            'performance_slo_last_result_json' => isset($input['performance_slo_last_result_json'])
+                ? sanitize_textarea_field((string)$input['performance_slo_last_result_json'])
+                : (string)$current['performance_slo_last_result_json'],
             'ga4_measurement_id' => isset($input['ga4_measurement_id']) ? strtoupper(sanitize_text_field(trim((string)$input['ga4_measurement_id']))) : (string)$current['ga4_measurement_id'],
             'ga4_property_id' => isset($input['ga4_property_id']) ? sanitize_text_field(trim((string)$input['ga4_property_id'])) : (string)$current['ga4_property_id'],
             'gtm_account_id' => isset($input['gtm_account_id']) ? sanitize_text_field(trim((string)$input['gtm_account_id'])) : (string)$current['gtm_account_id'],
@@ -137,6 +179,36 @@ class Options
             'analytics_google_last_deploy_status' => isset($input['analytics_google_last_deploy_status']) ? sanitize_text_field((string)$input['analytics_google_last_deploy_status']) : (string)$current['analytics_google_last_deploy_status'],
             'analytics_google_last_deploy_message' => isset($input['analytics_google_last_deploy_message']) ? sanitize_text_field((string)$input['analytics_google_last_deploy_message']) : (string)$current['analytics_google_last_deploy_message'],
             'analytics_google_last_deploy_at' => isset($input['analytics_google_last_deploy_at']) ? (int)$input['analytics_google_last_deploy_at'] : (int)$current['analytics_google_last_deploy_at'],
+            'safe_updates_include_core' => isset($input['safe_updates_include_core'])
+                ? $this->normalizeBoolean($input['safe_updates_include_core'])
+                : (int)$current['safe_updates_include_core'],
+            'safe_updates_include_plugins' => isset($input['safe_updates_include_plugins'])
+                ? $this->normalizeBoolean($input['safe_updates_include_plugins'])
+                : (int)$current['safe_updates_include_plugins'],
+            'safe_updates_include_themes' => isset($input['safe_updates_include_themes'])
+                ? $this->normalizeBoolean($input['safe_updates_include_themes'])
+                : (int)$current['safe_updates_include_themes'],
+            'safe_updates_plugin_allowlist' => isset($input['safe_updates_plugin_allowlist'])
+                ? sanitize_textarea_field((string)$input['safe_updates_plugin_allowlist'])
+                : (string)$current['safe_updates_plugin_allowlist'],
+            'safe_updates_theme_allowlist' => isset($input['safe_updates_theme_allowlist'])
+                ? sanitize_textarea_field((string)$input['safe_updates_theme_allowlist'])
+                : (string)$current['safe_updates_theme_allowlist'],
+            'safe_updates_dry_run' => isset($input['safe_updates_dry_run'])
+                ? $this->normalizeBoolean($input['safe_updates_dry_run'])
+                : (int)$current['safe_updates_dry_run'],
+            'safe_updates_last_status' => isset($input['safe_updates_last_status'])
+                ? sanitize_text_field((string)$input['safe_updates_last_status'])
+                : (string)$current['safe_updates_last_status'],
+            'safe_updates_last_message' => isset($input['safe_updates_last_message'])
+                ? sanitize_text_field((string)$input['safe_updates_last_message'])
+                : (string)$current['safe_updates_last_message'],
+            'safe_updates_last_at' => isset($input['safe_updates_last_at'])
+                ? (int)$input['safe_updates_last_at']
+                : (int)$current['safe_updates_last_at'],
+            'safe_updates_last_result_json' => isset($input['safe_updates_last_result_json'])
+                ? sanitize_textarea_field((string)$input['safe_updates_last_result_json'])
+                : (string)$current['safe_updates_last_result_json'],
         ];
 
         if (isset($input['shared_secret']) && trim((string)$input['shared_secret']) !== '') {
@@ -281,5 +353,21 @@ class Options
         $normalized = strtolower(trim((string)$value));
 
         return in_array($normalized, ['1', 'true', 'yes', 'on'], true) ? 1 : 0;
+    }
+
+    /**
+     * @param mixed $value
+     */
+    private function normalizeFloat($value, float $min, float $max, float $fallback): float
+    {
+        if (!is_numeric($value)) {
+            return $fallback;
+        }
+        $parsed = (float)$value;
+        if (!is_finite($parsed)) {
+            return $fallback;
+        }
+
+        return max($min, min($max, $parsed));
     }
 }

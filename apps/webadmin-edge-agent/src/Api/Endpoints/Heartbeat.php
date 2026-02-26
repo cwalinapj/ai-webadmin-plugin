@@ -94,6 +94,7 @@ class Heartbeat
             $this->jobStore->add('uptime', 'heartbeat', 'completed', 0.0, true, ['source' => $source]);
             $this->logger->log('info', 'Heartbeat accepted', [
                 'commands' => (string)count($commands),
+                'request_id' => (string)($response['request_id'] ?? ''),
             ]);
 
             $failedDispatch = 0;
@@ -127,6 +128,7 @@ class Heartbeat
             $this->jobStore->add('uptime', 'heartbeat', 'failed', 1.0, true, ['source' => $source]);
             $this->logger->log('error', 'Heartbeat failed', [
                 'status' => (string)($response['status'] ?? 0),
+                'request_id' => (string)($response['request_id'] ?? ''),
             ]);
         }
 

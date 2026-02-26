@@ -113,7 +113,10 @@ class AnalyticsGoalsAssistant
             $this->tabState->recordSync('analytics', 'ok', 'Goal assistant generated recommendations.');
             $this->tabState->addFinding('analytics', 'info', 'Goal plan generated', 'Review recommended goals and events.');
             $this->jobStore->add('analytics', 'goals_assistant', 'completed', 0.0, true, ['source' => $source]);
-            $this->logger->log('info', 'Goal assistant generated', ['source' => $source]);
+            $this->logger->log('info', 'Goal assistant generated', [
+                'source' => $source,
+                'request_id' => (string)($response['request_id'] ?? ''),
+            ]);
         } else {
             $message = 'Goal assistant failed.';
             if (!empty($response['status'])) {
@@ -131,7 +134,10 @@ class AnalyticsGoalsAssistant
             $this->tabState->recordSync('analytics', 'error', $message);
             $this->tabState->addFinding('analytics', 'error', 'Goal plan failed', $message);
             $this->jobStore->add('analytics', 'goals_assistant', 'failed', 0.4, true, ['source' => $source]);
-            $this->logger->log('error', 'Goal assistant failed', ['status' => (string)($response['status'] ?? 0)]);
+            $this->logger->log('error', 'Goal assistant failed', [
+                'status' => (string)($response['status'] ?? 0),
+                'request_id' => (string)($response['request_id'] ?? ''),
+            ]);
         }
 
         return $response;
