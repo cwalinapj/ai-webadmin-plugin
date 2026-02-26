@@ -1,0 +1,25 @@
+{
+  "name": "webadmin-control-plane-workers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "d1:migrate": "wrangler d1 migrations apply webadmin_control_plane --local",
+    "d1:migrate:remote": "wrangler d1 migrations apply webadmin_control_plane --remote"
+  },
+  "dependencies": {
+    "bs58": "^6.0.0",
+    "tweetnacl": "^1.0.3",
+    "viem": "^2.38.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260219.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8",
+    "wrangler": "^4.14.1"
+  }
+}

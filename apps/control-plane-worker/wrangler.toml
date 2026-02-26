@@ -1,0 +1,32 @@
+name = "webadmin-control-plane"
+main = "src/index.ts"
+compatibility_date = "2026-02-26"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "webadmin_control_plane"
+database_id = "REPLACE_WITH_REAL_DATABASE_ID"
+migrations_dir = "src/db/migrations"
+
+[[queues.producers]]
+binding = "JOB_QUEUE"
+queue = "webadmin-jobs"
+
+[[queues.producers]]
+binding = "JOB_DLQ"
+queue = "webadmin-jobs-dlq"
+
+[[queues.consumers]]
+queue = "webadmin-jobs"
+dead_letter_queue = "webadmin-jobs-dlq"
+
+[[durable_objects.bindings]]
+name = "SITE_LOCK"
+class_name = "SiteLock"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SiteLock"]
+
+[vars]
+REPLAY_WINDOW_SECONDS = "300"

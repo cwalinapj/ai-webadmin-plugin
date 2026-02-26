@@ -1,0 +1,24 @@
+{
+  "name": "sitebuilder/webadmin-edge-agent",
+  "description": "WordPress edge agent for Cloudflare Workers control plane",
+  "type": "wordpress-plugin",
+  "require": {
+    "php": ">=7.4"
+  },
+  "autoload": {
+    "psr-4": {
+      "WebAdminEdgeAgent\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "WebAdminEdgeAgent\\Tests\\": "tests/"
+    }
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^9.6"
+  },
+  "scripts": {
+    "test": "phpunit"
+  }
+}

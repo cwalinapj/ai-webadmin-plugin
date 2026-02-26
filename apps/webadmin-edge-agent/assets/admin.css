@@ -1,0 +1,11 @@
+.webadmin-edge-agent .nav-tab-wrapper {
+    margin-bottom: 16px;
+}
+
+.webadmin-edge-agent code {
+    word-break: break-all;
+}
+
+.webadmin-edge-agent .form-table th {
+    width: 220px;
+}

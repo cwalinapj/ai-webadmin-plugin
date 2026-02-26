@@ -1,0 +1,9 @@
+{
+  "name": "you/web3-wallet-admin-login",
+  "type": "project",
+  "require": {
+    "kornrunner/keccak": "^1.1",
+    "simplito/elliptic-php": "^1.0",
+    "stephenhill/base58": "^1.1"
+  }
+}

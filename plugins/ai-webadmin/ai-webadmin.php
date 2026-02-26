@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AI WebAdmin (Cloudflare Worker)
  * Description: Connects WordPress to AI WebAdmin workers for comment moderation, security workflows, and guided Cloudflare onboarding.
- * Version: 0.2.0
+ * Version: 0.3.1
  * Author: Sitebuilder
  * License: GPLv2 or later
  */
@@ -15,11 +15,169 @@ define("AI_WEBADMIN_OPTION_KEY", "ai_webadmin_settings");
 define("AI_WEBADMIN_DEFAULT_WORKER_BASE", "https://sitebuilder-agent.96psxbzqk2.workers.dev");
 define("AI_WEBADMIN_TOLLDNS_PLUGIN_SLUG", "tolldns/tolldns.php");
 define("AI_WEBADMIN_HTACCESS_MARKER", "AI WebAdmin Hardening");
+define("AI_WEBADMIN_ATTEST_PENDING_META_KEY", "ai_webadmin_login_attestation_pending");
+define("AI_WEBADMIN_ATTEST_LAST_META_KEY", "ai_webadmin_login_attestation_last");
+define("AI_WEBADMIN_ATTEST_NOTICE_TRANSIENT_PREFIX", "ai_webadmin_attest_notice_");
+define("AI_WEBADMIN_SOLANA_MEMO_PROGRAM", "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
+
+$aiWebadminComposerAutoload = __DIR__ . "/vendor/autoload.php";
+if (file_exists($aiWebadminComposerAutoload)) {
+    require_once $aiWebadminComposerAutoload;
+}
+
+const OPT_ATTEST_EVM_ENABLE = 'web3wal_attest_evm_enable';
+const OPT_ATTEST_EVM_RPC_MAP = 'web3wal_attest_evm_rpc_map';
+const OPT_ATTEST_EVM_CONTRACT = 'web3wal_attest_evm_contract';
+const OPT_ATTEST_EVM_EVENT_SIG = 'web3wal_attest_evm_event_sig';
+const OPT_ATTEST_SOL_ENABLE = 'web3wal_attest_sol_enable';
+const OPT_ATTEST_SOL_RPC = 'web3wal_attest_sol_rpc';
+
+function ai_webadmin_register_attestation_settings(): void {
+    register_setting('ai_webadmin_attestation', OPT_ATTEST_EVM_ENABLE, [
+        'type' => 'boolean',
+        'sanitize_callback' => 'ai_webadmin_sanitize_bool_setting',
+        'default' => false,
+    ]);
+    register_setting('ai_webadmin_attestation', OPT_ATTEST_EVM_RPC_MAP, [
+        'type' => 'string',
+        'sanitize_callback' => 'ai_webadmin_sanitize_rpc_map_json',
+        'default' => '{}',
+    ]);
+    register_setting('ai_webadmin_attestation', OPT_ATTEST_EVM_CONTRACT, [
+        'type' => 'string',
+        'sanitize_callback' => 'ai_webadmin_sanitize_evm_address',
+        'default' => '',
+    ]);
+    register_setting('ai_webadmin_attestation', OPT_ATTEST_EVM_EVENT_SIG, [
+        'type' => 'string',
+        'sanitize_callback' => 'ai_webadmin_sanitize_topic0',
+        'default' => '',
+    ]);
+    register_setting('ai_webadmin_attestation', OPT_ATTEST_SOL_ENABLE, [
+        'type' => 'boolean',
+        'sanitize_callback' => 'ai_webadmin_sanitize_bool_setting',
+        'default' => false,
+    ]);
+    register_setting('ai_webadmin_attestation', OPT_ATTEST_SOL_RPC, [
+        'type' => 'string',
+        'sanitize_callback' => 'ai_webadmin_sanitize_sol_rpc_url',
+        'default' => '',
+    ]);
+}
+add_action('admin_init', 'ai_webadmin_register_attestation_settings', 5);
+
+function ai_webadmin_sanitize_bool_setting($value): bool {
+    return !empty($value);
+}
+
+function ai_webadmin_sanitize_rpc_map_json($value): string {
+    $raw = trim((string)$value);
+    if ($raw === '') {
+        return '{}';
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return '{}';
+    }
+
+    $clean = [];
+    foreach ($decoded as $chainId => $url) {
+        $key = trim((string)$chainId);
+        if ($key === '' || !preg_match('/^[0-9]+$/', $key)) {
+            continue;
+        }
+        $cleanUrl = esc_url_raw(trim((string)$url));
+        if ($cleanUrl === '' || !preg_match('#^https?://#i', $cleanUrl)) {
+            continue;
+        }
+        $clean[$key] = $cleanUrl;
+    }
+
+    if (empty($clean)) {
+        return '{}';
+    }
+
+    $encoded = wp_json_encode($clean);
+    return is_string($encoded) ? $encoded : '{}';
+}
+
+function ai_webadmin_sanitize_evm_address($value): string {
+    $address = trim((string)$value);
+    if ($address === '') {
+        return '';
+    }
+    if (!preg_match('/^0x[0-9a-fA-F]{40}$/', $address)) {
+        return '';
+    }
+    return strtolower($address);
+}
+
+function ai_webadmin_sanitize_topic0($value): string {
+    $topic = trim((string)$value);
+    if ($topic === '') {
+        return '';
+    }
+    if (!preg_match('/^0x[0-9a-fA-F]{64}$/', $topic)) {
+        return '';
+    }
+    return strtolower($topic);
+}
+
+function ai_webadmin_sanitize_sol_rpc_url($value): string {
+    $url = esc_url_raw(trim((string)$value));
+    if ($url === '' || !preg_match('#^https?://#i', $url)) {
+        return '';
+    }
+    return $url;
+}
+
+function ai_webadmin_sanitize_plugin_instance_id($value): string {
+    $raw = trim((string)$value);
+    if ($raw === "") {
+        return "";
+    }
+    $clean = preg_replace('/[^A-Za-z0-9._:-]+/', '-', $raw);
+    $clean = trim((string)$clean, "-");
+    if ($clean === "") {
+        return "";
+    }
+    return substr($clean, 0, 80);
+}
+
+function ai_webadmin_get_attestation_settings(): array {
+    return [
+        "evm_enable" => (bool)get_option(OPT_ATTEST_EVM_ENABLE, false),
+        "evm_rpc_map" => (string)get_option(OPT_ATTEST_EVM_RPC_MAP, "{}"),
+        "evm_contract" => (string)get_option(OPT_ATTEST_EVM_CONTRACT, ""),
+        "evm_event_sig" => (string)get_option(OPT_ATTEST_EVM_EVENT_SIG, ""),
+        "sol_enable" => (bool)get_option(OPT_ATTEST_SOL_ENABLE, false),
+        "sol_rpc" => (string)get_option(OPT_ATTEST_SOL_RPC, ""),
+    ];
+}
+
+function ai_webadmin_save_attestation_settings_from_post(): void {
+    $evmEnable = isset($_POST[OPT_ATTEST_EVM_ENABLE]) ? 1 : 0;
+    $evmRpcMapRaw = isset($_POST[OPT_ATTEST_EVM_RPC_MAP]) ? wp_unslash($_POST[OPT_ATTEST_EVM_RPC_MAP]) : "{}";
+    $evmContractRaw = isset($_POST[OPT_ATTEST_EVM_CONTRACT]) ? wp_unslash($_POST[OPT_ATTEST_EVM_CONTRACT]) : "";
+    $evmEventSigRaw = isset($_POST[OPT_ATTEST_EVM_EVENT_SIG]) ? wp_unslash($_POST[OPT_ATTEST_EVM_EVENT_SIG]) : "";
+    $solEnable = isset($_POST[OPT_ATTEST_SOL_ENABLE]) ? 1 : 0;
+    $solRpcRaw = isset($_POST[OPT_ATTEST_SOL_RPC]) ? wp_unslash($_POST[OPT_ATTEST_SOL_RPC]) : "";
+
+    update_option(OPT_ATTEST_EVM_ENABLE, ai_webadmin_sanitize_bool_setting($evmEnable), false);
+    update_option(OPT_ATTEST_EVM_RPC_MAP, ai_webadmin_sanitize_rpc_map_json($evmRpcMapRaw), false);
+    update_option(OPT_ATTEST_EVM_CONTRACT, ai_webadmin_sanitize_evm_address($evmContractRaw), false);
+    update_option(OPT_ATTEST_EVM_EVENT_SIG, ai_webadmin_sanitize_topic0($evmEventSigRaw), false);
+    update_option(OPT_ATTEST_SOL_ENABLE, ai_webadmin_sanitize_bool_setting($solEnable), false);
+    update_option(OPT_ATTEST_SOL_RPC, ai_webadmin_sanitize_sol_rpc_url($solRpcRaw), false);
+}
 
 function ai_webadmin_default_settings() {
     return [
         "worker_base_url" => AI_WEBADMIN_DEFAULT_WORKER_BASE,
         "plugin_shared_secret" => "",
+        "plugin_instance_id" => "",
+        "sandbox_capability_token" => "",
         "onboarding_session_id" => "",
         "enable_comment_moderation" => 1,
         "enable_schema_injection" => 1,
@@ -57,6 +215,7 @@ function ai_webadmin_default_settings() {
         "unlock_passcode_hash" => "",
         "require_hardware_key_unlock" => 0,
         "require_wallet_signature_unlock" => 0,
+        "wallet_unlock_network" => "ethereum",
         "wallet_unlock_message_prefix" => "AI WebAdmin Login Challenge",
         "wallet_unlock_chain_id" => 1,
         "wallet_unlock_nonce_ttl_minutes" => 10,
@@ -81,6 +240,8 @@ function ai_webadmin_save_settings($input) {
     $next = [
         "worker_base_url" => isset($input["worker_base_url"]) ? esc_url_raw(trim((string)$input["worker_base_url"])) : $current["worker_base_url"],
         "plugin_shared_secret" => isset($input["plugin_shared_secret"]) ? trim((string)$input["plugin_shared_secret"]) : $current["plugin_shared_secret"],
+        "plugin_instance_id" => isset($input["plugin_instance_id"]) ? ai_webadmin_sanitize_plugin_instance_id($input["plugin_instance_id"]) : (string)($current["plugin_instance_id"] ?? ""),
+        "sandbox_capability_token" => isset($input["sandbox_capability_token"]) ? trim((string)$input["sandbox_capability_token"]) : (string)($current["sandbox_capability_token"] ?? ""),
         "onboarding_session_id" => isset($input["onboarding_session_id"]) ? sanitize_text_field(trim((string)$input["onboarding_session_id"])) : $current["onboarding_session_id"],
         "enable_comment_moderation" => !empty($input["enable_comment_moderation"]) ? 1 : 0,
         "enable_schema_injection" => !empty($input["enable_schema_injection"]) ? 1 : 0,
@@ -118,6 +279,7 @@ function ai_webadmin_save_settings($input) {
         "unlock_passcode_hash" => (string)($current["unlock_passcode_hash"] ?? ""),
         "require_hardware_key_unlock" => !empty($input["require_hardware_key_unlock"]) ? 1 : 0,
         "require_wallet_signature_unlock" => !empty($input["require_wallet_signature_unlock"]) ? 1 : 0,
+        "wallet_unlock_network" => ai_webadmin_normalize_wallet_network($input["wallet_unlock_network"] ?? ($current["wallet_unlock_network"] ?? "ethereum")),
         "wallet_unlock_message_prefix" => isset($input["wallet_unlock_message_prefix"])
             ? sanitize_text_field(trim((string)$input["wallet_unlock_message_prefix"]))
             : (string)($current["wallet_unlock_message_prefix"] ?? "AI WebAdmin Login Challenge"),
@@ -242,6 +404,14 @@ function ai_webadmin_unlock_enabled($settings = null) {
     );
 }
 
+function ai_webadmin_normalize_wallet_network($raw) {
+    $network = strtolower(trim((string)$raw));
+    if ($network === "solana") {
+        return "solana";
+    }
+    return "ethereum";
+}
+
 function ai_webadmin_wallet_nonce_key($nonce) {
     return "ai_webadmin_wallet_nonce_" . md5((string)$nonce);
 }
@@ -249,7 +419,8 @@ function ai_webadmin_wallet_nonce_key($nonce) {
 function ai_webadmin_issue_wallet_login_challenge($settings) {
     $nonce = wp_generate_password(24, false, false);
     $issuedAt = gmdate("c");
-    $chainId = max(1, (int)($settings["wallet_unlock_chain_id"] ?? 1));
+    $network = ai_webadmin_normalize_wallet_network($settings["wallet_unlock_network"] ?? "ethereum");
+    $chainId = $network === "ethereum" ? max(1, (int)($settings["wallet_unlock_chain_id"] ?? 1)) : 0;
     $prefix = trim((string)($settings["wallet_unlock_message_prefix"] ?? "AI WebAdmin Login Challenge"));
     if ($prefix === "") {
         $prefix = "AI WebAdmin Login Challenge";
@@ -260,7 +431,8 @@ function ai_webadmin_issue_wallet_login_challenge($settings) {
     }
     $message = $prefix .
         "\nSite: " . $siteHost .
-        "\nChain ID: " . $chainId .
+        "\nNetwork: " . strtoupper($network) .
+        ($network === "ethereum" ? ("\nChain ID: " . $chainId) : "") .
         "\nNonce: " . $nonce .
         "\nIssued At: " . $issuedAt;
     $ttlSeconds = max(180, min(1800, ((int)($settings["wallet_unlock_nonce_ttl_minutes"] ?? 10)) * 60));
@@ -268,6 +440,8 @@ function ai_webadmin_issue_wallet_login_challenge($settings) {
         "nonce" => $nonce,
         "message" => $message,
         "issued_at" => $issuedAt,
+        "network" => $network,
+        "chain_id" => $chainId,
         "ip" => ai_webadmin_client_ip(),
     ], $ttlSeconds);
 
@@ -275,11 +449,12 @@ function ai_webadmin_issue_wallet_login_challenge($settings) {
         "nonce" => $nonce,
         "issued_at" => $issuedAt,
         "message" => $message,
+        "network" => $network,
         "chain_id" => $chainId,
     ];
 }
 
-function ai_webadmin_wallet_verify_with_worker($settings, $user, $address, $signature, $message, $nonce) {
+function ai_webadmin_wallet_verify_with_worker($settings, $user, $address, $signature, $message, $nonce, $network = "ethereum") {
     if (!ai_webadmin_features_enabled()) {
         return new WP_Error("ai_webadmin_wallet_worker_unavailable", "Wallet unlock requires Worker API configuration.");
     }
@@ -292,6 +467,13 @@ function ai_webadmin_wallet_verify_with_worker($settings, $user, $address, $sign
     if (!is_array($nonceRecord) || empty($nonceRecord["nonce"])) {
         return new WP_Error("ai_webadmin_wallet_nonce_invalid", "Wallet challenge expired. Reload login page and try again.");
     }
+    $network = ai_webadmin_normalize_wallet_network($network);
+    $expectedMessage = (string)($nonceRecord["message"] ?? "");
+    $expectedNetwork = ai_webadmin_normalize_wallet_network($nonceRecord["network"] ?? "ethereum");
+    if ($message !== $expectedMessage || $network !== $expectedNetwork) {
+        delete_transient(ai_webadmin_wallet_nonce_key($nonce));
+        return new WP_Error("ai_webadmin_wallet_challenge_mismatch", "Wallet challenge mismatch. Reload login page and try again.");
+    }
     delete_transient(ai_webadmin_wallet_nonce_key($nonce));
 
     $response = ai_webadmin_signed_post($settings, "plugin/wp/auth/wallet/verify", [
@@ -303,6 +485,7 @@ function ai_webadmin_wallet_verify_with_worker($settings, $user, $address, $sign
         "wallet_address" => (string)$address,
         "wallet_signature" => (string)$signature,
         "wallet_message" => (string)$message,
+        "wallet_network" => $network,
         "wallet_nonce" => $nonce,
         "wallet_chain_id" => (int)($settings["wallet_unlock_chain_id"] ?? 1),
         "wallet_challenge_issued_at" => (string)($nonceRecord["issued_at"] ?? ""),
@@ -323,6 +506,7 @@ function ai_webadmin_wallet_verify_with_worker($settings, $user, $address, $sign
     }
     update_user_meta((int)$user->ID, "ai_webadmin_last_wallet_unlock", time());
     update_user_meta((int)$user->ID, "ai_webadmin_wallet_address", sanitize_text_field((string)($decoded["wallet_address"] ?? $address)));
+    update_user_meta((int)$user->ID, "ai_webadmin_wallet_network", sanitize_text_field((string)($decoded["wallet_network"] ?? $network)));
     return true;
 }
 
@@ -1062,6 +1246,474 @@ function ai_webadmin_login_failed($username, $error = null) {
     }
 }
 
+function ai_webadmin_attestation_notice_transient_key($userId) {
+    return AI_WEBADMIN_ATTEST_NOTICE_TRANSIENT_PREFIX . md5((string)$userId);
+}
+
+function ai_webadmin_set_attestation_flash_notice($userId, $type, $message) {
+    $userId = (int)$userId;
+    if ($userId <= 0) {
+        return;
+    }
+    $payload = [
+        "type" => ($type === "success") ? "success" : "error",
+        "message" => sanitize_text_field((string)$message),
+    ];
+    set_transient(ai_webadmin_attestation_notice_transient_key($userId), $payload, 120);
+}
+
+function ai_webadmin_render_attestation_flash_notice() {
+    $userId = (int)get_current_user_id();
+    if ($userId <= 0) {
+        return;
+    }
+    $key = ai_webadmin_attestation_notice_transient_key($userId);
+    $payload = get_transient($key);
+    if (!is_array($payload) || empty($payload["message"])) {
+        return;
+    }
+    delete_transient($key);
+    $klass = ($payload["type"] === "success") ? "notice-success" : "notice-error";
+    echo '<div class="notice ' . esc_attr($klass) . '"><p><strong>AI WebAdmin:</strong> ' . esc_html((string)$payload["message"]) . '</p></div>';
+}
+
+function ai_webadmin_get_pending_login_attestation($userId) {
+    $userId = (int)$userId;
+    if ($userId <= 0) {
+        return null;
+    }
+    $pending = get_user_meta($userId, AI_WEBADMIN_ATTEST_PENDING_META_KEY, true);
+    if (!is_array($pending)) {
+        return null;
+    }
+    $network = ai_webadmin_normalize_wallet_network($pending["wallet_network"] ?? "ethereum");
+    $wallet = trim((string)($pending["wallet_address"] ?? ""));
+    $nonce = trim((string)($pending["nonce"] ?? ""));
+    if ($wallet === "" || $nonce === "") {
+        return null;
+    }
+    $pending["wallet_network"] = $network;
+    $pending["wallet_address"] = $wallet;
+    $pending["nonce"] = $nonce;
+    return $pending;
+}
+
+function ai_webadmin_build_attestation_payload($pending) {
+    $domain = trim((string)($pending["domain"] ?? ""));
+    if ($domain === "") {
+        $domain = wp_parse_url(home_url("/"), PHP_URL_HOST);
+        if (!is_string($domain) || $domain === "") {
+            $domain = "unknown-site";
+        }
+    }
+    $userId = (int)($pending["user_id"] ?? 0);
+    $nonce = trim((string)($pending["nonce"] ?? ""));
+    return "aiwebadmin:login-attest:v0.3.1|domain={$domain}|user={$userId}|nonce={$nonce}";
+}
+
+function ai_webadmin_default_evm_attestation_topic0() {
+    if (!class_exists("\\kornrunner\\Keccak")) {
+        return "";
+    }
+    try {
+        return "0x" . strtolower((string)\kornrunner\Keccak::hash("LoginAttested(address,string,string)", 256));
+    } catch (\Throwable $error) {
+        return "";
+    }
+}
+
+function ai_webadmin_parse_evm_rpc_map($raw) {
+    $decoded = json_decode((string)$raw, true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+    $map = [];
+    foreach ($decoded as $chainId => $url) {
+        $chain = trim((string)$chainId);
+        if ($chain === "" || !preg_match('/^[0-9]+$/', $chain)) {
+            continue;
+        }
+        $rpc = ai_webadmin_sanitize_sol_rpc_url($url);
+        if ($rpc === "") {
+            continue;
+        }
+        $map[$chain] = $rpc;
+    }
+    return $map;
+}
+
+function ai_webadmin_rpc_request($rpcUrl, $method, $params = [], $timeout = 20) {
+    $body = wp_json_encode([
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => (string)$method,
+        "params" => is_array($params) ? $params : [],
+    ]);
+    if (!is_string($body) || $body === "") {
+        return new WP_Error("ai_webadmin_attest_json_encode_failed", "Failed to encode RPC request payload.");
+    }
+
+    $response = wp_remote_post($rpcUrl, [
+        "method" => "POST",
+        "timeout" => max(5, (int)$timeout),
+        "headers" => [
+            "Content-Type" => "application/json",
+        ],
+        "body" => $body,
+    ]);
+    if (is_wp_error($response)) {
+        return new WP_Error("ai_webadmin_attest_rpc_unreachable", "RPC request failed.");
+    }
+
+    $code = (int)wp_remote_retrieve_response_code($response);
+    $raw = (string)wp_remote_retrieve_body($response);
+    $decoded = json_decode($raw, true);
+    if ($code < 200 || $code >= 300 || !is_array($decoded)) {
+        return new WP_Error("ai_webadmin_attest_rpc_invalid_response", "RPC response was invalid.");
+    }
+    if (!empty($decoded["error"])) {
+        $message = "RPC returned an error.";
+        if (is_array($decoded["error"]) && !empty($decoded["error"]["message"])) {
+            $message = sanitize_text_field((string)$decoded["error"]["message"]);
+        }
+        return new WP_Error("ai_webadmin_attest_rpc_error", $message);
+    }
+    return $decoded["result"] ?? null;
+}
+
+function ai_webadmin_strip_0x($value) {
+    return strtolower((string)preg_replace('/^0x/i', "", trim((string)$value)));
+}
+
+function ai_webadmin_verify_login_attestation_evm($pending, $txHash) {
+    $txHash = trim((string)$txHash);
+    if (!preg_match('/^0x[0-9a-fA-F]{64}$/', $txHash)) {
+        return new WP_Error("ai_webadmin_attest_bad_tx_hash", "Invalid EVM transaction hash.");
+    }
+
+    $rpcMap = ai_webadmin_parse_evm_rpc_map((string)get_option(OPT_ATTEST_EVM_RPC_MAP, "{}"));
+    $chainId = trim((string)($pending["chain_id"] ?? ""));
+    $rpcUrl = ($chainId !== "" && isset($rpcMap[$chainId])) ? $rpcMap[$chainId] : ((count($rpcMap) > 0) ? reset($rpcMap) : "");
+    if (!is_string($rpcUrl) || $rpcUrl === "") {
+        return new WP_Error("ai_webadmin_attest_missing_evm_rpc", "EVM attestation RPC is not configured.");
+    }
+
+    $receipt = ai_webadmin_rpc_request($rpcUrl, "eth_getTransactionReceipt", [$txHash]);
+    if (is_wp_error($receipt) || !is_array($receipt)) {
+        return new WP_Error("ai_webadmin_attest_tx_not_found", "Unable to fetch EVM transaction receipt.");
+    }
+
+    $status = $receipt["status"] ?? null;
+    $statusOk = false;
+    if (is_string($status)) {
+        $statusOk = in_array(strtolower($status), ["0x1", "0x01", "1"], true);
+    } elseif (is_int($status)) {
+        $statusOk = ($status === 1);
+    }
+    if (!$statusOk) {
+        return new WP_Error("ai_webadmin_attest_evm_failed", "EVM attestation transaction failed.");
+    }
+
+    $expectedContract = ai_webadmin_sanitize_evm_address((string)get_option(OPT_ATTEST_EVM_CONTRACT, ""));
+    $receiptTo = ai_webadmin_sanitize_evm_address((string)($receipt["to"] ?? ""));
+    if ($expectedContract !== "" && $receiptTo !== $expectedContract) {
+        return new WP_Error("ai_webadmin_attest_wrong_contract", "EVM attestation tx target contract mismatch.");
+    }
+
+    $tx = ai_webadmin_rpc_request($rpcUrl, "eth_getTransactionByHash", [$txHash]);
+    if (is_wp_error($tx) || !is_array($tx)) {
+        return new WP_Error("ai_webadmin_attest_tx_missing", "Unable to fetch EVM transaction details.");
+    }
+
+    $expectedSigner = ai_webadmin_sanitize_evm_address((string)($pending["wallet_address"] ?? ""));
+    $txFrom = ai_webadmin_sanitize_evm_address((string)($tx["from"] ?? ""));
+    if ($expectedSigner !== "" && $txFrom !== $expectedSigner) {
+        return new WP_Error("ai_webadmin_attest_signer_mismatch", "EVM attestation signer does not match wallet.");
+    }
+
+    $expectedTopic = ai_webadmin_sanitize_topic0((string)get_option(OPT_ATTEST_EVM_EVENT_SIG, ""));
+    if ($expectedTopic === "") {
+        $expectedTopic = ai_webadmin_default_evm_attestation_topic0();
+    }
+    $expectedTopic = strtolower($expectedTopic);
+    $expectedSignerHex = str_replace("0x", "", strtolower($expectedSigner));
+    $expectedPayloadHex = strtolower(bin2hex(ai_webadmin_build_attestation_payload($pending)));
+    $expectedNonceHex = strtolower(bin2hex((string)($pending["nonce"] ?? "")));
+
+    $hasTopic = ($expectedTopic === "");
+    $eventSignerMatched = ($expectedSignerHex === "");
+    $hasContext = false;
+
+    $txInput = ai_webadmin_strip_0x((string)($tx["input"] ?? ""));
+    if ($expectedPayloadHex !== "" && strpos($txInput, $expectedPayloadHex) !== false) {
+        $hasContext = true;
+    }
+    if ($expectedNonceHex !== "" && strpos($txInput, $expectedNonceHex) !== false) {
+        $hasContext = true;
+    }
+
+    $logs = isset($receipt["logs"]) && is_array($receipt["logs"]) ? $receipt["logs"] : [];
+    foreach ($logs as $log) {
+        if (!is_array($log)) {
+            continue;
+        }
+        $topics = isset($log["topics"]) && is_array($log["topics"]) ? $log["topics"] : [];
+        if ($expectedTopic !== "" && isset($topics[0]) && strtolower((string)$topics[0]) === $expectedTopic) {
+            $hasTopic = true;
+            if ($expectedSignerHex !== "") {
+                foreach ($topics as $topic) {
+                    $topicHex = ai_webadmin_strip_0x((string)$topic);
+                    if (strlen($topicHex) >= 40 && substr($topicHex, -40) === $expectedSignerHex) {
+                        $eventSignerMatched = true;
+                        break;
+                    }
+                }
+            }
+        }
+        $dataHex = ai_webadmin_strip_0x((string)($log["data"] ?? ""));
+        if ($expectedPayloadHex !== "" && strpos($dataHex, $expectedPayloadHex) !== false) {
+            $hasContext = true;
+        }
+        if ($expectedNonceHex !== "" && strpos($dataHex, $expectedNonceHex) !== false) {
+            $hasContext = true;
+        }
+        foreach ($topics as $topic) {
+            $topicHex = ai_webadmin_strip_0x((string)$topic);
+            if ($expectedNonceHex !== "" && strpos($topicHex, $expectedNonceHex) !== false) {
+                $hasContext = true;
+            }
+            if ($expectedPayloadHex !== "" && strpos($topicHex, $expectedPayloadHex) !== false) {
+                $hasContext = true;
+            }
+        }
+    }
+
+    if (!$hasTopic) {
+        return new WP_Error("ai_webadmin_attest_event_missing", "Expected EVM attestation event was not found.");
+    }
+    if (!$eventSignerMatched) {
+        return new WP_Error("ai_webadmin_attest_event_signer_mismatch", "EVM attestation event signer does not match wallet.");
+    }
+    if (!$hasContext) {
+        return new WP_Error("ai_webadmin_attest_context_mismatch", "EVM attestation nonce/context was not found in tx data.");
+    }
+
+    return [
+        "network" => "ethereum",
+        "tx_hash" => strtolower($txHash),
+        "chain_id" => $chainId,
+    ];
+}
+
+function ai_webadmin_extract_solana_account_keys($txResult) {
+    $keys = [];
+    $rawKeys = $txResult["transaction"]["message"]["accountKeys"] ?? [];
+    if (!is_array($rawKeys)) {
+        return $keys;
+    }
+    foreach ($rawKeys as $entry) {
+        if (is_string($entry) && $entry !== "") {
+            $keys[] = trim($entry);
+            continue;
+        }
+        if (is_array($entry) && !empty($entry["pubkey"]) && is_string($entry["pubkey"])) {
+            $keys[] = trim((string)$entry["pubkey"]);
+        }
+    }
+    return array_values(array_unique(array_filter($keys)));
+}
+
+function ai_webadmin_decode_base58_to_string($raw) {
+    if (!class_exists("\\StephenHill\\Base58")) {
+        return null;
+    }
+    try {
+        $codec = new \StephenHill\Base58();
+        $decoded = $codec->decode((string)$raw);
+        return is_string($decoded) ? $decoded : null;
+    } catch (\Throwable $error) {
+        return null;
+    }
+}
+
+function ai_webadmin_collect_solana_memo_payloads($txResult) {
+    $payloads = [];
+
+    $collectFromInstruction = static function ($instruction) use (&$payloads) {
+        if (!is_array($instruction)) {
+            return;
+        }
+        $programId = trim((string)($instruction["programId"] ?? ""));
+        $program = strtolower(trim((string)($instruction["program"] ?? "")));
+        $isMemo = (strcasecmp($programId, AI_WEBADMIN_SOLANA_MEMO_PROGRAM) === 0) || ($program === "spl-memo") || (strpos($program, "memo") !== false);
+        if (!$isMemo) {
+            return;
+        }
+
+        $parsed = $instruction["parsed"] ?? null;
+        if (is_string($parsed) && $parsed !== "") {
+            $payloads[] = $parsed;
+        } elseif (is_array($parsed)) {
+            if (!empty($parsed["memo"]) && is_string($parsed["memo"])) {
+                $payloads[] = $parsed["memo"];
+            }
+            if (!empty($parsed["info"]) && is_string($parsed["info"])) {
+                $payloads[] = $parsed["info"];
+            }
+            if (!empty($parsed["info"]) && is_array($parsed["info"]) && !empty($parsed["info"]["memo"])) {
+                $payloads[] = (string)$parsed["info"]["memo"];
+            }
+        }
+
+        if (!empty($instruction["data"]) && is_string($instruction["data"])) {
+            $payloads[] = (string)$instruction["data"];
+            $decoded = ai_webadmin_decode_base58_to_string($instruction["data"]);
+            if (is_string($decoded) && $decoded !== "") {
+                $payloads[] = $decoded;
+            }
+        }
+    };
+
+    $instructions = $txResult["transaction"]["message"]["instructions"] ?? [];
+    if (is_array($instructions)) {
+        foreach ($instructions as $instruction) {
+            $collectFromInstruction($instruction);
+        }
+    }
+
+    $inner = $txResult["meta"]["innerInstructions"] ?? [];
+    if (is_array($inner)) {
+        foreach ($inner as $entry) {
+            if (!is_array($entry) || empty($entry["instructions"]) || !is_array($entry["instructions"])) {
+                continue;
+            }
+            foreach ($entry["instructions"] as $instruction) {
+                $collectFromInstruction($instruction);
+            }
+        }
+    }
+
+    return array_values(array_unique(array_filter(array_map("strval", $payloads))));
+}
+
+function ai_webadmin_verify_login_attestation_solana($pending, $txSignature) {
+    $txSignature = trim((string)$txSignature);
+    if (!preg_match('/^[1-9A-HJ-NP-Za-km-z]{43,128}$/', $txSignature)) {
+        return new WP_Error("ai_webadmin_attest_bad_signature", "Invalid Solana transaction signature.");
+    }
+
+    $rpcUrl = ai_webadmin_sanitize_sol_rpc_url((string)get_option(OPT_ATTEST_SOL_RPC, ""));
+    if ($rpcUrl === "") {
+        return new WP_Error("ai_webadmin_attest_missing_sol_rpc", "Solana attestation RPC is not configured.");
+    }
+
+    $txResult = ai_webadmin_rpc_request($rpcUrl, "getTransaction", [
+        $txSignature,
+        [
+            "encoding" => "jsonParsed",
+            "maxSupportedTransactionVersion" => 0,
+            "commitment" => "confirmed",
+        ],
+    ]);
+    if (is_wp_error($txResult) || !is_array($txResult)) {
+        return new WP_Error("ai_webadmin_attest_tx_not_found", "Unable to fetch Solana transaction.");
+    }
+
+    $metaErr = $txResult["meta"]["err"] ?? "__missing__";
+    if ($metaErr !== null && $metaErr !== "__missing__") {
+        return new WP_Error("ai_webadmin_attest_sol_failed", "Solana attestation transaction failed.");
+    }
+
+    $expectedSigner = trim((string)($pending["wallet_address"] ?? ""));
+    $accountKeys = ai_webadmin_extract_solana_account_keys($txResult);
+    if ($expectedSigner !== "" && !in_array($expectedSigner, $accountKeys, true)) {
+        return new WP_Error("ai_webadmin_attest_signer_mismatch", "Solana attestation signer does not match wallet.");
+    }
+
+    $expectedPayload = ai_webadmin_build_attestation_payload($pending);
+    $memoPayloads = ai_webadmin_collect_solana_memo_payloads($txResult);
+    $memoMatched = false;
+    foreach ($memoPayloads as $memo) {
+        if (strpos((string)$memo, $expectedPayload) !== false) {
+            $memoMatched = true;
+            break;
+        }
+    }
+    if (!$memoMatched) {
+        return new WP_Error("ai_webadmin_attest_memo_missing", "Expected Solana Memo payload was not found.");
+    }
+
+    return [
+        "network" => "solana",
+        "tx_hash" => $txSignature,
+    ];
+}
+
+function ai_webadmin_verify_login_attestation_tx($pending, $txRef) {
+    $issuedAt = (int)($pending["issued_at"] ?? 0);
+    if ($issuedAt <= 0 || (time() - $issuedAt) > 3600) {
+        return new WP_Error("ai_webadmin_attest_expired", "Login attestation challenge expired. Sign in again to refresh challenge.");
+    }
+
+    $network = ai_webadmin_normalize_wallet_network($pending["wallet_network"] ?? "ethereum");
+    if ($network === "solana") {
+        return ai_webadmin_verify_login_attestation_solana($pending, $txRef);
+    }
+    return ai_webadmin_verify_login_attestation_evm($pending, $txRef);
+}
+
+function ai_webadmin_get_login_attestation_mode($user, $pending) {
+    $mode = apply_filters("ai_webadmin_login_attestation_mode", "prompt", $user, $pending);
+    $mode = strtolower(trim((string)$mode));
+    if ($mode === "require") {
+        return "require";
+    }
+    return "prompt";
+}
+
+function ai_webadmin_maybe_prepare_login_attestation($user) {
+    if (!($user instanceof WP_User)) {
+        return;
+    }
+    $userId = (int)$user->ID;
+    if ($userId <= 0) {
+        return;
+    }
+
+    $settings = ai_webadmin_get_settings();
+    $attestationSettings = ai_webadmin_get_attestation_settings();
+    $network = ai_webadmin_normalize_wallet_network(get_user_meta($userId, "ai_webadmin_wallet_network", true));
+    if ($network === "") {
+        $network = ai_webadmin_normalize_wallet_network($settings["wallet_unlock_network"] ?? "ethereum");
+    }
+    $walletAddress = trim((string)get_user_meta($userId, "ai_webadmin_wallet_address", true));
+    if ($walletAddress === "") {
+        delete_user_meta($userId, AI_WEBADMIN_ATTEST_PENDING_META_KEY);
+        return;
+    }
+
+    $enabled = ($network === "solana") ? !empty($attestationSettings["sol_enable"]) : !empty($attestationSettings["evm_enable"]);
+    if (!$enabled) {
+        delete_user_meta($userId, AI_WEBADMIN_ATTEST_PENDING_META_KEY);
+        return;
+    }
+
+    $domain = wp_parse_url(home_url("/"), PHP_URL_HOST);
+    if (!is_string($domain) || $domain === "") {
+        $domain = "unknown-site";
+    }
+    $pending = [
+        "wallet_network" => $network,
+        "wallet_address" => $walletAddress,
+        "user_id" => $userId,
+        "domain" => $domain,
+        "nonce" => wp_generate_password(24, false, false),
+        "issued_at" => time(),
+        "chain_id" => max(1, (int)($settings["wallet_unlock_chain_id"] ?? 1)),
+    ];
+    update_user_meta($userId, AI_WEBADMIN_ATTEST_PENDING_META_KEY, $pending);
+}
+
 function ai_webadmin_login_success($userLogin, $user) {
     $settings = ai_webadmin_get_settings();
     $ip = ai_webadmin_client_ip();
@@ -1071,7 +1723,97 @@ function ai_webadmin_login_success($userLogin, $user) {
     }
     if ($user instanceof WP_User) {
         update_user_meta((int)$user->ID, "ai_webadmin_last_login_at", time());
+        ai_webadmin_maybe_prepare_login_attestation($user);
     }
+}
+
+function ai_webadmin_handle_verify_login_attestation() {
+    if (!is_user_logged_in()) {
+        wp_die("Unauthorized.");
+    }
+    check_admin_referer("ai_webadmin_verify_login_attestation", "ai_webadmin_attest_nonce");
+
+    $userId = (int)get_current_user_id();
+    $pending = ai_webadmin_get_pending_login_attestation($userId);
+    if (!is_array($pending)) {
+        ai_webadmin_set_attestation_flash_notice($userId, "error", "No pending login attestation challenge for this account.");
+        wp_safe_redirect(admin_url("options-general.php?page=ai-webadmin"));
+        exit;
+    }
+
+    $txRef = isset($_POST["ai_webadmin_attest_tx_hash"]) ? trim((string)wp_unslash($_POST["ai_webadmin_attest_tx_hash"])) : "";
+    if ($txRef === "") {
+        ai_webadmin_set_attestation_flash_notice($userId, "error", "Transaction hash/signature is required.");
+        wp_safe_redirect(admin_url("options-general.php?page=ai-webadmin"));
+        exit;
+    }
+
+    $verified = ai_webadmin_verify_login_attestation_tx($pending, $txRef);
+    if (is_wp_error($verified)) {
+        ai_webadmin_set_attestation_flash_notice($userId, "error", $verified->get_error_message());
+        wp_safe_redirect(admin_url("options-general.php?page=ai-webadmin"));
+        exit;
+    }
+
+    delete_user_meta($userId, AI_WEBADMIN_ATTEST_PENDING_META_KEY);
+    update_user_meta($userId, AI_WEBADMIN_ATTEST_LAST_META_KEY, [
+        "verified_at" => time(),
+        "network" => (string)($verified["network"] ?? ""),
+        "tx_hash" => (string)($verified["tx_hash"] ?? ""),
+        "payload" => ai_webadmin_build_attestation_payload($pending),
+    ]);
+    ai_webadmin_set_attestation_flash_notice($userId, "success", "Login attestation verified successfully.");
+    wp_safe_redirect(admin_url("options-general.php?page=ai-webadmin"));
+    exit;
+}
+
+function ai_webadmin_enforce_required_login_attestation() {
+    if (!is_admin() || !is_user_logged_in() || wp_doing_ajax()) {
+        return;
+    }
+    $user = wp_get_current_user();
+    if (!($user instanceof WP_User)) {
+        return;
+    }
+    $pending = ai_webadmin_get_pending_login_attestation((int)$user->ID);
+    if (!is_array($pending)) {
+        return;
+    }
+
+    $mode = ai_webadmin_get_login_attestation_mode($user, $pending);
+    if ($mode !== "require" || !current_user_can("manage_options")) {
+        return;
+    }
+
+    global $pagenow;
+    $currentPage = isset($_GET["page"]) ? sanitize_text_field((string)wp_unslash($_GET["page"])) : "";
+    $action = isset($_REQUEST["action"]) ? sanitize_text_field((string)wp_unslash($_REQUEST["action"])) : "";
+    $isSettingsPage = ($pagenow === "options-general.php" && $currentPage === "ai-webadmin");
+    $isVerifyPost = ($pagenow === "admin-post.php" && $action === "ai_webadmin_verify_login_attestation");
+    if ($isSettingsPage || $isVerifyPost) {
+        return;
+    }
+
+    wp_safe_redirect(admin_url("options-general.php?page=ai-webadmin&ai_webadmin_attest=1"));
+    exit;
+}
+
+function ai_webadmin_attestation_admin_notice() {
+    if (!current_user_can("manage_options")) {
+        return;
+    }
+    $userId = (int)get_current_user_id();
+    if ($userId <= 0) {
+        return;
+    }
+    $pending = ai_webadmin_get_pending_login_attestation($userId);
+    if (!is_array($pending)) {
+        return;
+    }
+    $mode = ai_webadmin_get_login_attestation_mode(wp_get_current_user(), $pending);
+    $prefix = ($mode === "require") ? "required" : "recommended";
+    $url = admin_url("options-general.php?page=ai-webadmin");
+    echo '<div class="notice notice-warning"><p><strong>AI WebAdmin:</strong> On-chain login attestation is ' . esc_html($prefix) . ' for this session. <a href="' . esc_url($url) . '">Verify now</a>.</p></div>';
 }
 
 function ai_webadmin_enforce_admin_sso_login($user, $username, $password) {
@@ -1192,9 +1934,11 @@ function ai_webadmin_render_unlock_login_fields() {
       <input type="hidden" name="ai_webadmin_wallet_signature" id="ai_webadmin_wallet_signature" value="" />
       <input type="hidden" name="ai_webadmin_wallet_message" id="ai_webadmin_wallet_message" value="<?php echo esc_attr($challenge["message"]); ?>" />
       <input type="hidden" name="ai_webadmin_wallet_nonce" id="ai_webadmin_wallet_nonce" value="<?php echo esc_attr($challenge["nonce"]); ?>" />
+      <input type="hidden" name="ai_webadmin_wallet_network" id="ai_webadmin_wallet_network" value="<?php echo esc_attr($challenge["network"]); ?>" />
       <p>
         <button type="button" id="ai-webadmin-wallet-sign" class="button button-secondary">Sign Wallet Challenge</button><br/>
-        <span id="ai-webadmin-wallet-status" class="description">Not signed yet.</span>
+        <span id="ai-webadmin-wallet-status" class="description">Not signed yet.</span><br/>
+        <span class="description">Wallet network: <strong><?php echo esc_html(strtoupper((string)$challenge["network"])); ?></strong></span>
       </p>
       <script>
       (function() {
@@ -1204,20 +1948,55 @@ function ai_webadmin_render_unlock_login_fields() {
         var addrField = document.getElementById("ai_webadmin_wallet_address");
         var sigField = document.getElementById("ai_webadmin_wallet_signature");
         var msgField = document.getElementById("ai_webadmin_wallet_message");
+        var networkField = document.getElementById("ai_webadmin_wallet_network");
         var setStatus = function(text) { if (status) status.textContent = text; };
+        var bytesToBase64 = function(bytes) {
+          var binary = "";
+          for (var i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          return btoa(binary);
+        };
         btn.addEventListener("click", async function() {
           try {
+            var network = networkField && networkField.value === "solana" ? "solana" : "ethereum";
+            var message = msgField ? msgField.value : "";
+            if (network === "solana") {
+              if (!window.solana || typeof window.solana.signMessage !== "function") {
+                setStatus("No Solana wallet with signMessage() detected.");
+                return;
+              }
+              if (typeof window.solana.connect === "function") {
+                await window.solana.connect();
+              }
+              var publicKey = window.solana.publicKey && window.solana.publicKey.toString ? window.solana.publicKey.toString() : "";
+              if (!publicKey) {
+                setStatus("No Solana wallet account selected.");
+                return;
+              }
+              var encoded = new TextEncoder().encode(message);
+              var signed = await window.solana.signMessage(encoded, "utf8");
+              var signatureBytes = signed && signed.signature ? signed.signature : signed;
+              if (!signatureBytes || !signatureBytes.length) {
+                setStatus("Solana wallet signature failed.");
+                return;
+              }
+              if (addrField) addrField.value = publicKey;
+              if (sigField) sigField.value = "base64:" + bytesToBase64(signatureBytes);
+              setStatus("Solana wallet challenge signed.");
+              return;
+            }
+
             if (!window.ethereum || !window.ethereum.request) {
-              setStatus("No wallet detected in browser.");
+              setStatus("No Ethereum wallet detected in browser.");
               return;
             }
             const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
             const account = Array.isArray(accounts) && accounts.length ? accounts[0] : "";
             if (!account) {
-              setStatus("No wallet account selected.");
+              setStatus("No Ethereum wallet account selected.");
               return;
             }
-            var message = msgField ? msgField.value : "";
             let signature;
             try {
               signature = await window.ethereum.request({ method: "personal_sign", params: [message, account] });
@@ -1226,7 +2005,7 @@ function ai_webadmin_render_unlock_login_fields() {
             }
             if (addrField) addrField.value = account;
             if (sigField) sigField.value = signature || "";
-            setStatus(signature ? "Wallet challenge signed." : "Wallet signature failed.");
+            setStatus(signature ? "Ethereum wallet challenge signed." : "Wallet signature failed.");
           } catch (err) {
             setStatus("Wallet signature failed.");
           }
@@ -1274,10 +2053,11 @@ function ai_webadmin_validate_unlock_factors($user, $username, $password) {
         $signature = isset($_POST["ai_webadmin_wallet_signature"]) ? trim((string)wp_unslash($_POST["ai_webadmin_wallet_signature"])) : "";
         $message = isset($_POST["ai_webadmin_wallet_message"]) ? (string)wp_unslash($_POST["ai_webadmin_wallet_message"]) : "";
         $nonce = isset($_POST["ai_webadmin_wallet_nonce"]) ? (string)wp_unslash($_POST["ai_webadmin_wallet_nonce"]) : "";
+        $network = isset($_POST["ai_webadmin_wallet_network"]) ? ai_webadmin_normalize_wallet_network(wp_unslash($_POST["ai_webadmin_wallet_network"])) : ai_webadmin_normalize_wallet_network($settings["wallet_unlock_network"] ?? "ethereum");
         if ($address === "" || $signature === "" || $message === "" || $nonce === "") {
             return new WP_Error("ai_webadmin_wallet_missing_fields", "Wallet unlock requires address + signature.");
         }
-        $walletResult = ai_webadmin_wallet_verify_with_worker($settings, $user, $address, $signature, $message, $nonce);
+        $walletResult = ai_webadmin_wallet_verify_with_worker($settings, $user, $address, $signature, $message, $nonce, $network);
         if (is_wp_error($walletResult)) {
             return $walletResult;
         }
@@ -1289,6 +2069,7 @@ add_filter("authenticate", "ai_webadmin_validate_unlock_factors", 55, 3);
 
 add_action("init", "ai_webadmin_block_xmlrpc_request", 0);
 add_action("admin_init", "ai_webadmin_run_hardening_pass", 5);
+add_action("admin_init", "ai_webadmin_enforce_required_login_attestation", 30);
 add_action("user_register", "ai_webadmin_set_safe_display_name", 20, 1);
 add_action("profile_update", "ai_webadmin_set_safe_display_name", 20, 1);
 add_filter("pre_update_option_active_plugins", "ai_webadmin_filter_blocked_active_plugins", 10, 2);
@@ -1298,6 +2079,8 @@ add_filter("authenticate", "ai_webadmin_enforce_admin_sso_login", 40, 3);
 add_filter("pre_wp_mail", "ai_webadmin_pre_wp_mail_filter", 10, 2);
 add_action("wp_login_failed", "ai_webadmin_login_failed", 10, 2);
 add_action("wp_login", "ai_webadmin_login_success", 10, 2);
+add_action("admin_post_ai_webadmin_verify_login_attestation", "ai_webadmin_handle_verify_login_attestation");
+add_action("admin_notices", "ai_webadmin_attestation_admin_notice", 8);
 
 function ai_webadmin_admin_notice() {
     if (!current_user_can("manage_options")) {
@@ -1380,6 +2163,8 @@ function ai_webadmin_handle_settings_submit() {
     $input = [
         "worker_base_url" => isset($_POST["worker_base_url"]) ? wp_unslash($_POST["worker_base_url"]) : "",
         "plugin_shared_secret" => isset($_POST["plugin_shared_secret"]) ? wp_unslash($_POST["plugin_shared_secret"]) : "",
+        "plugin_instance_id" => isset($_POST["plugin_instance_id"]) ? wp_unslash($_POST["plugin_instance_id"]) : "",
+        "sandbox_capability_token" => isset($_POST["sandbox_capability_token"]) ? wp_unslash($_POST["sandbox_capability_token"]) : "",
         "onboarding_session_id" => isset($_POST["onboarding_session_id"]) ? wp_unslash($_POST["onboarding_session_id"]) : "",
         "enable_comment_moderation" => isset($_POST["enable_comment_moderation"]) ? 1 : 0,
         "enable_schema_injection" => isset($_POST["enable_schema_injection"]) ? 1 : 0,
@@ -1412,6 +2197,7 @@ function ai_webadmin_handle_settings_submit() {
         "clear_unlock_passcode" => isset($_POST["clear_unlock_passcode"]) ? 1 : 0,
         "require_hardware_key_unlock" => isset($_POST["require_hardware_key_unlock"]) ? 1 : 0,
         "require_wallet_signature_unlock" => isset($_POST["require_wallet_signature_unlock"]) ? 1 : 0,
+        "wallet_unlock_network" => isset($_POST["wallet_unlock_network"]) ? wp_unslash($_POST["wallet_unlock_network"]) : "ethereum",
         "wallet_unlock_message_prefix" => isset($_POST["wallet_unlock_message_prefix"]) ? wp_unslash($_POST["wallet_unlock_message_prefix"]) : "",
         "wallet_unlock_chain_id" => isset($_POST["wallet_unlock_chain_id"]) ? wp_unslash($_POST["wallet_unlock_chain_id"]) : "",
         "wallet_unlock_nonce_ttl_minutes" => isset($_POST["wallet_unlock_nonce_ttl_minutes"]) ? wp_unslash($_POST["wallet_unlock_nonce_ttl_minutes"]) : "",
@@ -1422,6 +2208,7 @@ function ai_webadmin_handle_settings_submit() {
     ];
     $githubToken = isset($_POST["github_classic_token"]) ? trim((string)wp_unslash($_POST["github_classic_token"])) : "";
     ai_webadmin_save_settings($input);
+    ai_webadmin_save_attestation_settings_from_post();
     ai_webadmin_run_hardening_pass(true);
     ai_webadmin_sync_email_forwarding_profile();
     ai_webadmin_sweep_email_display_names(500);
@@ -1440,16 +2227,206 @@ function ai_webadmin_handle_settings_submit() {
 }
 add_action("admin_init", "ai_webadmin_handle_settings_submit");
 
+function ai_webadmin_sandbox_conflict_status($raw, $allowAll = false, $fallback = "open") {
+    $value = strtolower(trim((string)$raw));
+    if ($value === "resolved" || $value === "dismissed") {
+        return $value;
+    }
+    if ($allowAll && $value === "all") {
+        return "all";
+    }
+    return ($fallback === "resolved" || $fallback === "dismissed" || ($allowAll && $fallback === "all"))
+        ? $fallback
+        : "open";
+}
+
+function ai_webadmin_handle_conflict_report_submit() {
+    if (!isset($_POST["ai_webadmin_conflict_report_submit"])) {
+        return;
+    }
+    if (!current_user_can("manage_options")) {
+        return;
+    }
+
+    check_admin_referer("ai_webadmin_sandbox_conflict_report", "ai_webadmin_conflict_report_nonce");
+    $settings = ai_webadmin_get_settings();
+
+    $siteId = sanitize_text_field(trim((string)wp_unslash($_POST["ai_webadmin_conflict_site_id"] ?? "")));
+    $summary = sanitize_text_field(trim((string)wp_unslash($_POST["ai_webadmin_conflict_summary"] ?? "")));
+    if ($siteId === "" || $summary === "") {
+        add_settings_error(
+            "ai_webadmin_messages",
+            "ai_webadmin_conflict_missing_fields",
+            "Sandbox conflict report requires site ID and summary.",
+            "error"
+        );
+        return;
+    }
+
+    $requestId = sanitize_text_field(trim((string)wp_unslash($_POST["ai_webadmin_conflict_request_id"] ?? "")));
+    $blockedBy = sanitize_text_field(trim((string)wp_unslash($_POST["ai_webadmin_conflict_blocked_by_request_id"] ?? "")));
+    $sandboxId = sanitize_text_field(trim((string)wp_unslash($_POST["ai_webadmin_conflict_sandbox_id"] ?? "")));
+    $agentId = sanitize_text_field(trim((string)wp_unslash($_POST["ai_webadmin_conflict_agent_id"] ?? "")));
+    if ($agentId === "") {
+        $agentId = ai_webadmin_default_sandbox_agent_id();
+    }
+
+    $typeRaw = sanitize_text_field(trim((string)wp_unslash($_POST["ai_webadmin_conflict_type"] ?? "")));
+    $conflictType = ($typeRaw !== "") ? $typeRaw : "general";
+    $severityRaw = (int)wp_unslash($_POST["ai_webadmin_conflict_severity"] ?? 3);
+    $severity = max(1, min(5, $severityRaw));
+
+    $detailsRaw = trim((string)wp_unslash($_POST["ai_webadmin_conflict_details"] ?? ""));
+    $details = null;
+    if ($detailsRaw !== "") {
+        $decoded = json_decode($detailsRaw, true);
+        $details = is_array($decoded) ? $decoded : sanitize_textarea_field($detailsRaw);
+    }
+
+    $response = ai_webadmin_report_sandbox_conflict($settings, [
+        "site_id" => $siteId,
+        "request_id" => ($requestId !== "") ? $requestId : null,
+        "agent_id" => $agentId,
+        "conflict_type" => $conflictType,
+        "severity" => $severity,
+        "summary" => $summary,
+        "details" => $details,
+        "blocked_by_request_id" => ($blockedBy !== "") ? $blockedBy : null,
+        "sandbox_id" => ($sandboxId !== "") ? $sandboxId : null,
+    ]);
+    list($status, $decoded, $errorText) = ai_webadmin_decode_worker_json_response($response);
+
+    if ($status >= 200 && $status < 300 && !empty($decoded["ok"])) {
+        $conflictId = sanitize_text_field((string)($decoded["conflict"]["id"] ?? ""));
+        $message = "Sandbox conflict reported.";
+        if ($conflictId !== "") {
+            $message .= " Conflict ID: " . $conflictId;
+        }
+        add_settings_error("ai_webadmin_messages", "ai_webadmin_conflict_reported", $message, "updated");
+        return;
+    }
+
+    if ($errorText === "") {
+        $errorText = "Unable to report sandbox conflict.";
+    }
+    add_settings_error(
+        "ai_webadmin_messages",
+        "ai_webadmin_conflict_report_failed",
+        "Sandbox conflict report failed: " . $errorText,
+        "error"
+    );
+}
+add_action("admin_init", "ai_webadmin_handle_conflict_report_submit");
+
+function ai_webadmin_handle_conflict_resolve_submit() {
+    if (!isset($_POST["ai_webadmin_conflict_resolve_submit"])) {
+        return;
+    }
+    if (!current_user_can("manage_options")) {
+        return;
+    }
+
+    check_admin_referer("ai_webadmin_sandbox_conflict_resolve", "ai_webadmin_conflict_resolve_nonce");
+    $settings = ai_webadmin_get_settings();
+
+    $conflictId = sanitize_text_field(trim((string)wp_unslash($_POST["ai_webadmin_conflict_id"] ?? "")));
+    if ($conflictId === "") {
+        add_settings_error(
+            "ai_webadmin_messages",
+            "ai_webadmin_conflict_resolve_missing_id",
+            "Conflict ID is required to resolve a sandbox conflict.",
+            "error"
+        );
+        return;
+    }
+
+    $agentId = sanitize_text_field(trim((string)wp_unslash($_POST["ai_webadmin_conflict_resolve_agent_id"] ?? "")));
+    if ($agentId === "") {
+        $agentId = ai_webadmin_default_sandbox_agent_id();
+    }
+    $status = ai_webadmin_sandbox_conflict_status(wp_unslash($_POST["ai_webadmin_conflict_resolve_status"] ?? "resolved"), false, "resolved");
+    $resolutionNote = sanitize_textarea_field((string)wp_unslash($_POST["ai_webadmin_conflict_resolution_note"] ?? ""));
+
+    $response = ai_webadmin_resolve_sandbox_conflict($settings, [
+        "conflict_id" => $conflictId,
+        "agent_id" => $agentId,
+        "status" => $status,
+        "resolution_note" => ($resolutionNote !== "") ? $resolutionNote : null,
+    ]);
+    list($httpStatus, $decoded, $errorText) = ai_webadmin_decode_worker_json_response($response);
+
+    if ($httpStatus >= 200 && $httpStatus < 300 && !empty($decoded["ok"])) {
+        add_settings_error("ai_webadmin_messages", "ai_webadmin_conflict_resolved", "Sandbox conflict updated successfully.", "updated");
+        return;
+    }
+
+    if ($errorText === "") {
+        $errorText = "Unable to resolve sandbox conflict.";
+    }
+    add_settings_error(
+        "ai_webadmin_messages",
+        "ai_webadmin_conflict_resolve_failed",
+        "Sandbox conflict resolve failed: " . $errorText,
+        "error"
+    );
+}
+add_action("admin_init", "ai_webadmin_handle_conflict_resolve_submit");
+
 function ai_webadmin_render_settings_page() {
     if (!current_user_can("manage_options")) {
         return;
     }
     $settings = ai_webadmin_get_settings();
+    $attestationSettings = ai_webadmin_get_attestation_settings();
+    $pendingAttestation = ai_webadmin_get_pending_login_attestation(get_current_user_id());
+    $defaultAgentId = ai_webadmin_default_sandbox_agent_id();
+    $conflictStatusFilter = ai_webadmin_sandbox_conflict_status(wp_unslash($_GET["ai_webadmin_conflict_status"] ?? "open"), true);
+    $conflictSiteFilter = sanitize_text_field(trim((string)wp_unslash($_GET["ai_webadmin_conflict_site"] ?? "")));
+    $conflictRequestFilter = sanitize_text_field(trim((string)wp_unslash($_GET["ai_webadmin_conflict_request"] ?? "")));
+    $sandboxConfigReady = (
+        trim((string)($settings["worker_base_url"] ?? "")) !== "" &&
+        trim((string)($settings["plugin_shared_secret"] ?? "")) !== "" &&
+        trim((string)($settings["sandbox_capability_token"] ?? "")) !== ""
+    );
+    $conflictList = [];
+    $conflictListError = "";
+    if ($sandboxConfigReady) {
+        $listResponse = ai_webadmin_list_sandbox_conflicts($settings, [
+            "status" => $conflictStatusFilter,
+            "site_id" => ($conflictSiteFilter !== "") ? $conflictSiteFilter : null,
+            "request_id" => ($conflictRequestFilter !== "") ? $conflictRequestFilter : null,
+            "limit" => 50,
+        ]);
+        list($listStatus, $listDecoded, $listErrorText) = ai_webadmin_decode_worker_json_response($listResponse);
+        if ($listStatus >= 200 && $listStatus < 300 && !empty($listDecoded["ok"]) && is_array($listDecoded["conflicts"] ?? null)) {
+            $conflictList = $listDecoded["conflicts"];
+        } else {
+            $conflictListError = ($listErrorText !== "") ? $listErrorText : "Unable to fetch sandbox conflict list.";
+        }
+    }
     settings_errors("ai_webadmin_messages");
+    ai_webadmin_render_attestation_flash_notice();
     ?>
     <div class="wrap">
       <h1>AI WebAdmin</h1>
       <p>Connect WordPress to Cloudflare Workers for AI moderation and maintenance workflows.</p>
+      <?php if (is_array($pendingAttestation)): ?>
+      <div class="notice notice-warning">
+        <p><strong>AI WebAdmin:</strong> Login attestation is pending for this session.</p>
+        <p>
+          <strong>Network:</strong> <?php echo esc_html(strtoupper((string)($pendingAttestation["wallet_network"] ?? ""))); ?><br/>
+          <strong>Wallet:</strong> <?php echo esc_html((string)($pendingAttestation["wallet_address"] ?? "")); ?><br/>
+          <strong>Expected payload:</strong> <code><?php echo esc_html(ai_webadmin_build_attestation_payload($pendingAttestation)); ?></code>
+        </p>
+        <form method="post" action="<?php echo esc_url(admin_url("admin-post.php")); ?>">
+          <input type="hidden" name="action" value="ai_webadmin_verify_login_attestation" />
+          <?php wp_nonce_field("ai_webadmin_verify_login_attestation", "ai_webadmin_attest_nonce"); ?>
+          <label for="ai_webadmin_attest_tx_hash"><strong>Transaction hash/signature</strong></label><br/>
+          <input name="ai_webadmin_attest_tx_hash" id="ai_webadmin_attest_tx_hash" type="text" class="regular-text" value="" autocomplete="off" />
+          <p><button type="submit" class="button button-secondary">Verify Attestation</button></p>
+        </form>
+      </div>
+      <?php endif; ?>
       <form method="post">
         <?php wp_nonce_field("ai_webadmin_settings_save", "ai_webadmin_nonce"); ?>
         <table class="form-table" role="presentation">
@@ -1460,6 +2437,20 @@ function ai_webadmin_render_settings_page() {
           <tr>
             <th scope="row"><label for="plugin_shared_secret">Plugin Shared Secret</label></th>
             <td><input name="plugin_shared_secret" id="plugin_shared_secret" type="text" class="regular-text" value="<?php echo esc_attr($settings["plugin_shared_secret"]); ?>" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="plugin_instance_id">Plugin Instance ID</label></th>
+            <td>
+              <input name="plugin_instance_id" id="plugin_instance_id" type="text" class="regular-text" value="<?php echo esc_attr((string)$settings["plugin_instance_id"]); ?>" />
+              <p class="description">Used as <code>X-Plugin-Id</code> for signed sandbox scheduler/conflict endpoints. Defaults to onboarding session or site host when empty.</p>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="sandbox_capability_token">Sandbox Capability Token</label></th>
+            <td>
+              <input name="sandbox_capability_token" id="sandbox_capability_token" type="text" class="regular-text code" value="<?php echo esc_attr((string)$settings["sandbox_capability_token"]); ?>" />
+              <p class="description">Maps to Worker env token for <code>CAP_TOKEN_SANDBOX_WRITE</code>.</p>
+            </td>
           </tr>
           <tr>
             <th scope="row"><label for="onboarding_session_id">Onboarding Session ID</label></th>
@@ -1513,7 +2504,7 @@ function ai_webadmin_render_settings_page() {
             <td>
               <label><input name="enable_passcode_unlock" type="checkbox" value="1" <?php checked((int)$settings["enable_passcode_unlock"], 1); ?> /> Require passcode unlock on login</label><br/>
               <label><input name="require_hardware_key_unlock" type="checkbox" value="1" <?php checked((int)$settings["require_hardware_key_unlock"], 1); ?> /> Require hardware key/passkey verification (WebAuthn integration)</label><br/>
-              <label><input name="require_wallet_signature_unlock" type="checkbox" value="1" <?php checked((int)$settings["require_wallet_signature_unlock"], 1); ?> /> Require Web3 wallet signature unlock</label>
+              <label><input name="require_wallet_signature_unlock" type="checkbox" value="1" <?php checked((int)$settings["require_wallet_signature_unlock"], 1); ?> /> Require wallet signature unlock</label>
             </td>
           </tr>
           <tr>
@@ -1527,13 +2518,34 @@ function ai_webadmin_render_settings_page() {
           <tr>
             <th scope="row">Wallet Unlock</th>
             <td>
+              <label for="wallet_unlock_network">Wallet network</label>
+              <select name="wallet_unlock_network" id="wallet_unlock_network">
+                <option value="ethereum" <?php selected(ai_webadmin_normalize_wallet_network($settings["wallet_unlock_network"] ?? "ethereum"), "ethereum"); ?>>Ethereum</option>
+                <option value="solana" <?php selected(ai_webadmin_normalize_wallet_network($settings["wallet_unlock_network"] ?? "ethereum"), "solana"); ?>>Solana</option>
+              </select><br/>
               <label for="wallet_unlock_message_prefix">Challenge message prefix</label><br/>
               <input name="wallet_unlock_message_prefix" id="wallet_unlock_message_prefix" type="text" class="regular-text" value="<?php echo esc_attr($settings["wallet_unlock_message_prefix"]); ?>" /><br/>
               <label for="wallet_unlock_chain_id">Chain ID</label>
               <input name="wallet_unlock_chain_id" id="wallet_unlock_chain_id" type="number" min="1" max="999999" value="<?php echo esc_attr((string)$settings["wallet_unlock_chain_id"]); ?>" />
               <label for="wallet_unlock_nonce_ttl_minutes">Nonce TTL (minutes)</label>
               <input name="wallet_unlock_nonce_ttl_minutes" id="wallet_unlock_nonce_ttl_minutes" type="number" min="3" max="30" value="<?php echo esc_attr((string)$settings["wallet_unlock_nonce_ttl_minutes"]); ?>" />
-              <p class="description">Wallet verification is validated by Worker endpoint <code>/plugin/wp/auth/wallet/verify</code>.</p>
+              <p class="description">Wallet verification is validated by Worker endpoint <code>/plugin/wp/auth/wallet/verify</code>. Chain ID applies to Ethereum only.</p>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">On-Chain Attestation</th>
+            <td>
+              <label><input name="<?php echo esc_attr(OPT_ATTEST_EVM_ENABLE); ?>" type="checkbox" value="1" <?php checked(!empty($attestationSettings["evm_enable"]), true); ?> /> Enable EVM post-login attestation</label><br/>
+              <label for="<?php echo esc_attr(OPT_ATTEST_EVM_RPC_MAP); ?>">EVM RPC map JSON</label><br/>
+              <textarea name="<?php echo esc_attr(OPT_ATTEST_EVM_RPC_MAP); ?>" id="<?php echo esc_attr(OPT_ATTEST_EVM_RPC_MAP); ?>" rows="3" class="large-text code"><?php echo esc_textarea((string)$attestationSettings["evm_rpc_map"]); ?></textarea><br/>
+              <label for="<?php echo esc_attr(OPT_ATTEST_EVM_CONTRACT); ?>">EVM attestation contract</label><br/>
+              <input name="<?php echo esc_attr(OPT_ATTEST_EVM_CONTRACT); ?>" id="<?php echo esc_attr(OPT_ATTEST_EVM_CONTRACT); ?>" type="text" class="regular-text code" value="<?php echo esc_attr((string)$attestationSettings["evm_contract"]); ?>" /><br/>
+              <label for="<?php echo esc_attr(OPT_ATTEST_EVM_EVENT_SIG); ?>">EVM event topic0 (optional override)</label><br/>
+              <input name="<?php echo esc_attr(OPT_ATTEST_EVM_EVENT_SIG); ?>" id="<?php echo esc_attr(OPT_ATTEST_EVM_EVENT_SIG); ?>" type="text" class="large-text code" value="<?php echo esc_attr((string)$attestationSettings["evm_event_sig"]); ?>" /><br/><br/>
+              <label><input name="<?php echo esc_attr(OPT_ATTEST_SOL_ENABLE); ?>" type="checkbox" value="1" <?php checked(!empty($attestationSettings["sol_enable"]), true); ?> /> Enable Solana post-login attestation</label><br/>
+              <label for="<?php echo esc_attr(OPT_ATTEST_SOL_RPC); ?>">Solana RPC endpoint</label><br/>
+              <input name="<?php echo esc_attr(OPT_ATTEST_SOL_RPC); ?>" id="<?php echo esc_attr(OPT_ATTEST_SOL_RPC); ?>" type="url" class="large-text code" value="<?php echo esc_attr((string)$attestationSettings["sol_rpc"]); ?>" /><br/>
+              <p class="description">Attestation payload format: <code>aiwebadmin:login-attest:v0.3.1|domain=...|user=...|nonce=...</code>. Use filter <code>ai_webadmin_login_attestation_mode</code> to switch from prompt to require.</p>
             </td>
           </tr>
           <tr>
@@ -1606,6 +2618,150 @@ function ai_webadmin_render_settings_page() {
           <button type="submit" name="ai_webadmin_settings_submit" class="button button-primary">Save Changes</button>
         </p>
       </form>
+
+      <hr />
+      <h2>Sandbox Conflict Pool</h2>
+      <p>Report blockers between agents, view queue conflicts, and resolve or dismiss them after remediation.</p>
+      <?php if (!$sandboxConfigReady): ?>
+      <div class="notice notice-warning inline">
+        <p><strong>Sandbox conflict pool unavailable:</strong> set Worker Base URL, Plugin Shared Secret, and Sandbox Capability Token first.</p>
+      </div>
+      <?php endif; ?>
+
+      <h3>Report Conflict</h3>
+      <form method="post">
+        <?php wp_nonce_field("ai_webadmin_sandbox_conflict_report", "ai_webadmin_conflict_report_nonce"); ?>
+        <table class="form-table" role="presentation">
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_site_id">Site ID</label></th>
+            <td><input type="text" class="regular-text" id="ai_webadmin_conflict_site_id" name="ai_webadmin_conflict_site_id" value="<?php echo esc_attr($conflictSiteFilter); ?>" required /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_request_id">Request ID</label></th>
+            <td><input type="text" class="regular-text code" id="ai_webadmin_conflict_request_id" name="ai_webadmin_conflict_request_id" value="" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_agent_id">Agent ID</label></th>
+            <td><input type="text" class="regular-text" id="ai_webadmin_conflict_agent_id" name="ai_webadmin_conflict_agent_id" value="<?php echo esc_attr($defaultAgentId); ?>" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_type">Conflict Type</label></th>
+            <td><input type="text" class="regular-text" id="ai_webadmin_conflict_type" name="ai_webadmin_conflict_type" value="general" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_severity">Severity</label></th>
+            <td><input type="number" min="1" max="5" id="ai_webadmin_conflict_severity" name="ai_webadmin_conflict_severity" value="3" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_summary">Summary</label></th>
+            <td><input type="text" class="large-text" id="ai_webadmin_conflict_summary" name="ai_webadmin_conflict_summary" value="" required /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_details">Details (JSON or text)</label></th>
+            <td><textarea id="ai_webadmin_conflict_details" name="ai_webadmin_conflict_details" class="large-text code" rows="4"></textarea></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_blocked_by_request_id">Blocked By Request ID</label></th>
+            <td><input type="text" class="regular-text code" id="ai_webadmin_conflict_blocked_by_request_id" name="ai_webadmin_conflict_blocked_by_request_id" value="" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_sandbox_id">Sandbox ID</label></th>
+            <td><input type="text" class="regular-text code" id="ai_webadmin_conflict_sandbox_id" name="ai_webadmin_conflict_sandbox_id" value="" /></td>
+          </tr>
+        </table>
+        <p class="submit">
+          <button type="submit" class="button button-secondary" name="ai_webadmin_conflict_report_submit">Report Sandbox Conflict</button>
+        </p>
+      </form>
+
+      <h3>Conflict Feed</h3>
+      <form method="get" style="margin-bottom: 12px;">
+        <input type="hidden" name="page" value="ai-webadmin" />
+        <label for="ai_webadmin_conflict_status"><strong>Status</strong></label>
+        <select id="ai_webadmin_conflict_status" name="ai_webadmin_conflict_status">
+          <option value="open" <?php selected($conflictStatusFilter, "open"); ?>>Open</option>
+          <option value="resolved" <?php selected($conflictStatusFilter, "resolved"); ?>>Resolved</option>
+          <option value="dismissed" <?php selected($conflictStatusFilter, "dismissed"); ?>>Dismissed</option>
+          <option value="all" <?php selected($conflictStatusFilter, "all"); ?>>All</option>
+        </select>
+        <label for="ai_webadmin_conflict_site"><strong>Site ID</strong></label>
+        <input type="text" class="regular-text" id="ai_webadmin_conflict_site" name="ai_webadmin_conflict_site" value="<?php echo esc_attr($conflictSiteFilter); ?>" />
+        <label for="ai_webadmin_conflict_request"><strong>Request ID</strong></label>
+        <input type="text" class="regular-text" id="ai_webadmin_conflict_request" name="ai_webadmin_conflict_request" value="<?php echo esc_attr($conflictRequestFilter); ?>" />
+        <button type="submit" class="button">Refresh Feed</button>
+      </form>
+      <?php if ($sandboxConfigReady && $conflictListError !== ""): ?>
+      <div class="notice notice-error inline">
+        <p><?php echo esc_html("Conflict feed error: " . $conflictListError); ?></p>
+      </div>
+      <?php endif; ?>
+      <?php if ($sandboxConfigReady && $conflictListError === ""): ?>
+        <?php if (empty($conflictList)): ?>
+        <p><em>No sandbox conflicts found for current filter.</em></p>
+        <?php else: ?>
+        <table class="widefat striped">
+          <thead>
+            <tr>
+              <th>Created</th>
+              <th>Status</th>
+              <th>Severity</th>
+              <th>Site</th>
+              <th>Request</th>
+              <th>Agent</th>
+              <th>Type</th>
+              <th>Summary</th>
+              <th>Conflict ID</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($conflictList as $conflict): ?>
+            <tr>
+              <td><?php echo esc_html((string)($conflict["created_at"] ?? "")); ?></td>
+              <td><?php echo esc_html((string)($conflict["status"] ?? "")); ?></td>
+              <td><?php echo esc_html((string)($conflict["severity"] ?? "")); ?></td>
+              <td><?php echo esc_html((string)($conflict["site_id"] ?? "")); ?></td>
+              <td><code><?php echo esc_html((string)($conflict["request_id"] ?? "")); ?></code></td>
+              <td><?php echo esc_html((string)($conflict["agent_id"] ?? "")); ?></td>
+              <td><?php echo esc_html((string)($conflict["conflict_type"] ?? "")); ?></td>
+              <td><?php echo esc_html((string)($conflict["summary"] ?? "")); ?></td>
+              <td><code><?php echo esc_html((string)($conflict["id"] ?? "")); ?></code></td>
+            </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+        <?php endif; ?>
+      <?php endif; ?>
+
+      <h3>Resolve Or Dismiss Conflict</h3>
+      <form method="post">
+        <?php wp_nonce_field("ai_webadmin_sandbox_conflict_resolve", "ai_webadmin_conflict_resolve_nonce"); ?>
+        <table class="form-table" role="presentation">
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_id">Conflict ID</label></th>
+            <td><input type="text" class="regular-text code" id="ai_webadmin_conflict_id" name="ai_webadmin_conflict_id" value="" required /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_resolve_agent_id">Agent ID</label></th>
+            <td><input type="text" class="regular-text" id="ai_webadmin_conflict_resolve_agent_id" name="ai_webadmin_conflict_resolve_agent_id" value="<?php echo esc_attr($defaultAgentId); ?>" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_resolve_status">Status</label></th>
+            <td>
+              <select id="ai_webadmin_conflict_resolve_status" name="ai_webadmin_conflict_resolve_status">
+                <option value="resolved">Resolved</option>
+                <option value="dismissed">Dismissed</option>
+              </select>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="ai_webadmin_conflict_resolution_note">Resolution Note</label></th>
+            <td><textarea id="ai_webadmin_conflict_resolution_note" name="ai_webadmin_conflict_resolution_note" class="large-text" rows="3"></textarea></td>
+          </tr>
+        </table>
+        <p class="submit">
+          <button type="submit" class="button button-secondary" name="ai_webadmin_conflict_resolve_submit">Update Conflict</button>
+        </p>
+      </form>
     </div>
     <?php
 }
@@ -1626,6 +2782,112 @@ add_action("comment_post", "ai_webadmin_queue_comment", 10, 2);
 
 function ai_webadmin_build_signature($timestamp, $body, $secret) {
     return hash_hmac("sha256", $timestamp . "." . $body, $secret);
+}
+
+function ai_webadmin_effective_plugin_instance_id($settings) {
+    $explicit = ai_webadmin_sanitize_plugin_instance_id((string)($settings["plugin_instance_id"] ?? ""));
+    if ($explicit !== "") {
+        return $explicit;
+    }
+
+    $sessionId = ai_webadmin_sanitize_plugin_instance_id((string)($settings["onboarding_session_id"] ?? ""));
+    if ($sessionId !== "") {
+        return $sessionId;
+    }
+
+    $host = parse_url(home_url("/"), PHP_URL_HOST);
+    if (is_string($host)) {
+        $hostId = ai_webadmin_sanitize_plugin_instance_id($host);
+        if ($hostId !== "") {
+            return $hostId;
+        }
+    }
+
+    return "wp-" . substr(md5((string)home_url("/")), 0, 12);
+}
+
+function ai_webadmin_signed_mutation_post($settings, $path, $payload, $timeout = 10) {
+    $secret = trim((string)($settings["plugin_shared_secret"] ?? ""));
+    $workerBase = trim((string)($settings["worker_base_url"] ?? ""));
+    $capabilityToken = trim((string)($settings["sandbox_capability_token"] ?? ""));
+    if ($secret === "" || $workerBase === "") {
+        return new WP_Error("ai_webadmin_worker_not_configured", "Worker URL and Plugin Shared Secret are required.");
+    }
+    if ($capabilityToken === "") {
+        return new WP_Error("ai_webadmin_sandbox_capability_missing", "Sandbox Capability Token is required for sandbox scheduler/conflict endpoints.");
+    }
+
+    $body = wp_json_encode($payload);
+    if (!is_string($body)) {
+        return new WP_Error("ai_webadmin_signed_payload_invalid", "Failed to encode JSON payload.");
+    }
+
+    $normalizedPath = "/" . ltrim((string)$path, "/");
+    $timestamp = (string)time();
+    $nonce = wp_generate_uuid4();
+    $idempotencyKey = wp_generate_uuid4();
+    $bodyHash = hash("sha256", $body);
+    $canonical = $timestamp . "." . $nonce . ".POST." . $normalizedPath . "." . $bodyHash;
+    $signature = hash_hmac("sha256", $canonical, $secret);
+    $endpoint = trailingslashit($workerBase) . ltrim($normalizedPath, "/");
+
+    return wp_remote_post($endpoint, [
+        "method" => "POST",
+        "timeout" => max(3, (int)$timeout),
+        "headers" => [
+            "Content-Type" => "application/json",
+            "X-Plugin-Id" => ai_webadmin_effective_plugin_instance_id($settings),
+            "X-Plugin-Timestamp" => $timestamp,
+            "X-Plugin-Nonce" => $nonce,
+            "X-Plugin-Signature" => $signature,
+            "X-Capability-Token" => $capabilityToken,
+            "Idempotency-Key" => $idempotencyKey,
+        ],
+        "body" => $body,
+    ]);
+}
+
+function ai_webadmin_decode_worker_json_response($response) {
+    if (is_wp_error($response)) {
+        return [0, [], $response->get_error_message()];
+    }
+
+    $status = (int)wp_remote_retrieve_response_code($response);
+    $rawBody = wp_remote_retrieve_body($response);
+    $decoded = json_decode((string)$rawBody, true);
+    if (!is_array($decoded)) {
+        $decoded = [];
+    }
+    $errorText = "";
+    if ($status < 200 || $status >= 300) {
+        $errorText = sanitize_text_field((string)($decoded["error"] ?? ("worker_http_" . $status)));
+    }
+
+    return [$status, $decoded, $errorText];
+}
+
+function ai_webadmin_report_sandbox_conflict($settings, $payload) {
+    return ai_webadmin_signed_mutation_post($settings, "/plugin/wp/sandbox/conflicts/report", $payload, 12);
+}
+
+function ai_webadmin_list_sandbox_conflicts($settings, $filters) {
+    return ai_webadmin_signed_mutation_post($settings, "/plugin/wp/sandbox/conflicts/list", $filters, 12);
+}
+
+function ai_webadmin_resolve_sandbox_conflict($settings, $payload) {
+    return ai_webadmin_signed_mutation_post($settings, "/plugin/wp/sandbox/conflicts/resolve", $payload, 12);
+}
+
+function ai_webadmin_default_sandbox_agent_id() {
+    $user = wp_get_current_user();
+    if ($user instanceof WP_User && $user->ID > 0) {
+        $login = sanitize_text_field((string)$user->user_login);
+        if ($login !== "") {
+            return $login;
+        }
+        return "wp-user-" . (int)$user->ID;
+    }
+    return "wp-admin";
 }
 
 function ai_webadmin_detect_redundant_plugins($activePluginData) {

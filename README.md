@@ -1,23 +1,122 @@
-# ai-webadmin-plugin
+# WP Admin Plugin Suite
 
-Dedicated repository for AI WebAdmin WordPress plugin family.
+Repository for multiple WordPress plugins and a Cloudflare control plane.
 
-## Contents
-- `plugin/ai-webadmin` — main AI WebAdmin plugin.
-- `plugin/tolldns` — TollDNS dependency plugin used by free-tier checks.
-- `update-feed` — plugin update metadata artifacts.
-- `docs` — installation, contracts, and security docs.
-- `scripts` — plugin-side operational script scaffolds.
+This repo is now organized as a multi-product suite (not web3-only):
+- `apps/webadmin-edge-agent`: production WordPress edge agent plugin.
+- `apps/control-plane-worker`: Cloudflare Worker control plane.
+- `plugins/ai-webadmin`: legacy all-in-one AI WebAdmin plugin.
+- `plugins/tolldns`: TollDNS helper plugin.
 
-## Contracts
-This repo consumes frozen APIs from `Sitebuilder1.0/api-contracts.md`.
+## Repository layout
 
-## Security
-- Signed plugin requests (`X-Plugin-Timestamp`, `X-Plugin-Signature`).
-- 5-minute replay window expected in backend verification.
-- Avoid storing plaintext secrets in WordPress options when avoidable.
+```text
+repo/
+  apps/
+    webadmin-edge-agent/
+    control-plane-worker/
+  plugins/
+    ai-webadmin/
+    tolldns/
+  docs/
+  scripts/
+  update-feed/
+```
 
-## Plugin-only roadmap docs
-- `docs/web-admin-core-duties.md`
-- `docs/plugin-execution-roadmap.md`
-- `docs/script-contract-matrix.md`
+## Local development
+
+### WP-Env
+- Requires Node 20+ and Docker.
+- Plugin mounted from `./apps/webadmin-edge-agent`.
+
+```bash
+npm install -g @wordpress/env
+wp-env start
+```
+
+### Docker Compose
+- WordPress plugin mounted from `./apps/webadmin-edge-agent`.
+
+```bash
+docker compose up -d
+```
+
+### Worker
+
+```bash
+cd apps/control-plane-worker
+npm install
+npm run dev
+```
+
+## Wallet login verification
+
+`plugins/ai-webadmin` now supports wallet-signature login for:
+- Ethereum (`personal_sign`)
+- Solana (`signMessage`)
+
+Worker endpoint:
+- `POST /plugin/wp/auth/wallet/verify`
+
+The worker verifies signed requests and validates wallet signatures for both networks.
+
+## Sandbox Scheduler (Agent Voting)
+
+Control-plane worker now supports sandbox queue orchestration with agent voting:
+- `POST /plugin/wp/sandbox/request`
+- `POST /plugin/wp/sandbox/vote`
+- `POST /plugin/wp/sandbox/claim`
+- `POST /plugin/wp/sandbox/release`
+- `POST /plugin/wp/sandbox/conflicts/report`
+- `POST /plugin/wp/sandbox/conflicts/list`
+- `POST /plugin/wp/sandbox/conflicts/resolve`
+
+Selection order is weighted by:
+- request priority
+- summed agent votes
+- queue age (anti-starvation boost)
+
+Claims are serialized with a Durable Object lock so multiple agents do not claim the same sandbox slot.
+Agents can also share a conflict pool for blocked work, read active conflicts, and resolve/dismiss them after remediation.
+All sandbox routes use signed plugin auth and require capability token `CAP_TOKEN_SANDBOX_WRITE`.
+
+## Tests
+
+### Worker tests (includes Ethereum + Solana wallet verify tests)
+
+```bash
+cd apps/control-plane-worker
+npm test
+```
+
+### Edge agent PHP tests
+
+```bash
+cd apps/webadmin-edge-agent
+composer install
+composer test
+```
+
+## Build installable edge-agent zip
+
+```bash
+./scripts/build-webadmin-edge-agent-zip.sh
+```
+
+Artifact:
+- `apps/webadmin-edge-agent/dist/webadmin-edge-agent.zip`
+
+## CI
+
+GitHub Actions workflow:
+- Runs worker tests (including Ethereum/Solana wallet-login verification path).
+- Runs WordPress edge-agent PHPUnit suite.
+- Runs PHP lint for `plugins/ai-webadmin` and `plugins/tolldns`.
+
+## GitHub repo rename
+
+If you want the GitHub repository slug renamed from a web3-specific name, do it in:
+- GitHub -> Repository -> `Settings` -> `General` -> `Repository name`
+
+Suggested neutral name:
+- `wp-admin-plugin-suite`
