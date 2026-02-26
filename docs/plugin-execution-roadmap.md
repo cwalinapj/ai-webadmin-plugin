@@ -37,3 +37,5 @@
 - `POST /plugin/wp/rollback/execute`
 - `POST /plugin/wp/watchdog/heartbeat`
 - `POST /plugin/wp/security/integrity/report`
+
+For control-panel addons and non-WordPress runtimes, use the same contracts with `/plugin/site/*` path aliases.

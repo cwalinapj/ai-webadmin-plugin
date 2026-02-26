@@ -5,6 +5,7 @@ namespace WebAdminEdgeAgent;
 use WebAdminEdgeAgent\Admin\Menu;
 use WebAdminEdgeAgent\Api\Client;
 use WebAdminEdgeAgent\Api\Endpoints\AnalyticsGoogle;
+use WebAdminEdgeAgent\Api\Endpoints\AnalyticsGoalsAssistant;
 use WebAdminEdgeAgent\Api\Endpoints\Heartbeat;
 use WebAdminEdgeAgent\Command\Dispatcher;
 use WebAdminEdgeAgent\Storage\JobStore;
@@ -29,6 +30,8 @@ class Plugin
     private Heartbeat $heartbeatEndpoint;
 
     private AnalyticsGoogle $analyticsGoogleEndpoint;
+
+    private AnalyticsGoalsAssistant $analyticsGoalsAssistantEndpoint;
 
     private Menu $menu;
 
@@ -71,11 +74,19 @@ class Plugin
             $this->tabState,
             $this->jobStore
         );
+        $this->analyticsGoalsAssistantEndpoint = new AnalyticsGoalsAssistant(
+            $this->options,
+            $this->logger,
+            $this->client,
+            $this->tabState,
+            $this->jobStore
+        );
         $this->menu = new Menu(
             $this->options,
             $this->logger,
             $this->heartbeatEndpoint,
             $this->analyticsGoogleEndpoint,
+            $this->analyticsGoalsAssistantEndpoint,
             $this->tabState,
             $this->jobStore
         );
