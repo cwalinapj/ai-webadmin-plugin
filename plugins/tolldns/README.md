@@ -12,3 +12,7 @@
 ## Notes
 - AI WebAdmin checks plugin activation state, so this plugin intentionally stays lightweight.
 - This plugin does not manage DNS records directly in this MVP.
+
+## Related projects
+
+- **DECENTRALIZED-DNS** — the decentralized Cloudflare-like DNS platform that this plugin integrates with for free-tier policy enforcement and settlement: https://github.com/cwalinapj/DECENTRALIZED-DNS-

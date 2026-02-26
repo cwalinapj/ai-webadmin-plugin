@@ -6,7 +6,7 @@ This repo is now organized as a multi-product suite (not web3-only):
 - `apps/webadmin-edge-agent`: production WordPress edge agent plugin.
 - `apps/control-plane-worker`: Cloudflare Worker control plane.
 - `plugins/ai-webadmin`: legacy all-in-one AI WebAdmin plugin.
-- `plugins/tolldns`: TollDNS helper plugin.
+- [`plugins/tolldns`](plugins/tolldns/README.md): TollDNS helper plugin — part of the [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-) platform.
 
 ## Repository layout
 
