@@ -7,6 +7,8 @@ use WebAdminEdgeAgent\Api\Client;
 use WebAdminEdgeAgent\Api\Endpoints\AnalyticsGoogle;
 use WebAdminEdgeAgent\Api\Endpoints\AnalyticsGoalsAssistant;
 use WebAdminEdgeAgent\Api\Endpoints\Heartbeat;
+use WebAdminEdgeAgent\Api\Endpoints\PerformanceSlo;
+use WebAdminEdgeAgent\Api\Endpoints\SafeUpdates;
 use WebAdminEdgeAgent\Command\Dispatcher;
 use WebAdminEdgeAgent\Storage\JobStore;
 use WebAdminEdgeAgent\Storage\Logger;
@@ -32,6 +34,10 @@ class Plugin
     private AnalyticsGoogle $analyticsGoogleEndpoint;
 
     private AnalyticsGoalsAssistant $analyticsGoalsAssistantEndpoint;
+
+    private PerformanceSlo $performanceSloEndpoint;
+
+    private SafeUpdates $safeUpdatesEndpoint;
 
     private Menu $menu;
 
@@ -81,12 +87,30 @@ class Plugin
             $this->tabState,
             $this->jobStore
         );
+        $this->performanceSloEndpoint = new PerformanceSlo(
+            $this->options,
+            $this->logger,
+            $this->client,
+            $this->dispatcher,
+            $this->tabState,
+            $this->jobStore
+        );
+        $this->safeUpdatesEndpoint = new SafeUpdates(
+            $this->options,
+            $this->logger,
+            $this->client,
+            $this->dispatcher,
+            $this->tabState,
+            $this->jobStore
+        );
         $this->menu = new Menu(
             $this->options,
             $this->logger,
             $this->heartbeatEndpoint,
             $this->analyticsGoogleEndpoint,
             $this->analyticsGoalsAssistantEndpoint,
+            $this->performanceSloEndpoint,
+            $this->safeUpdatesEndpoint,
             $this->tabState,
             $this->jobStore
         );
@@ -158,7 +182,11 @@ class Plugin
 
     public function enqueueAssets(string $hook): void
     {
-        if ($hook !== 'toplevel_page_webadmin-edge-agent') {
+        $allowedHooks = [
+            'toplevel_page_webadmin-edge-agent',
+            'webadmin-edge-agent_page_webadmin-edge-agent-logs',
+        ];
+        if (!in_array($hook, $allowedHooks, true)) {
             return;
         }
 

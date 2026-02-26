@@ -71,7 +71,9 @@ class AnalyticsGoogle
                 'analytics_google_last_sync_at' => time(),
             ]);
             $this->tabState->recordSync('analytics', 'ok', 'Google OAuth flow started.');
-            $this->logger->log('info', 'Google OAuth connect started');
+            $this->logger->log('info', 'Google OAuth connect started', [
+                'request_id' => (string)($response['request_id'] ?? ''),
+            ]);
         }
 
         return $response;
@@ -178,7 +180,10 @@ class AnalyticsGoogle
             $this->tabState->recordSync('analytics', 'ok', 'Google deploy completed.');
             $this->tabState->addFinding('analytics', 'info', 'Google deploy complete', 'GTM and GA4 conversions were deployed.');
             $this->jobStore->add('analytics', 'google_deploy', 'completed', 0.0, false, ['source' => $source]);
-            $this->logger->log('info', 'Google deploy completed', ['source' => $source]);
+            $this->logger->log('info', 'Google deploy completed', [
+                'source' => $source,
+                'request_id' => (string)($response['request_id'] ?? ''),
+            ]);
         } else {
             $message = 'Google deploy failed.';
             if (!empty($response['status'])) {
@@ -196,7 +201,10 @@ class AnalyticsGoogle
             $this->tabState->recordSync('analytics', 'error', $message);
             $this->tabState->addFinding('analytics', 'error', 'Google deploy failed', $message);
             $this->jobStore->add('analytics', 'google_deploy', 'failed', 0.7, false, ['source' => $source]);
-            $this->logger->log('error', 'Google deploy failed', ['status' => (string)($response['status'] ?? 0)]);
+            $this->logger->log('error', 'Google deploy failed', [
+                'status' => (string)($response['status'] ?? 0),
+                'request_id' => (string)($response['request_id'] ?? ''),
+            ]);
         }
 
         return $response;

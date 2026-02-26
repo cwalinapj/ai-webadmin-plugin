@@ -64,6 +64,7 @@ class Client
         $timestamp = (string)time();
         $nonce = Nonce::uuidV4();
         $idempotencyKey = Nonce::uuidV4();
+        $requestId = Nonce::uuidV4();
 
         $signature = Signer::sign($sharedSecret, $timestamp, $nonce, $normalizedMethod, $normalizedPath, $body);
 
@@ -75,6 +76,7 @@ class Client
             'X-Plugin-Signature' => $signature,
             'X-Capability-Token' => $capabilityToken,
             'Idempotency-Key' => $idempotencyKey,
+            'X-Request-Id' => $requestId,
         ];
 
         $response = wp_remote_request($url, [
@@ -88,39 +90,32 @@ class Client
             $this->logger->log('error', 'Worker request failed', [
                 'path' => $normalizedPath,
                 'reason' => $response->get_error_message(),
+                'request_id' => $requestId,
             ]);
 
             return [
                 'ok' => false,
                 'status' => 0,
                 'error' => 'wp_remote_request_failed',
+                'request_id' => $requestId,
             ];
         }
 
         $status = (int)wp_remote_retrieve_response_code($response);
         $rawBody = (string)wp_remote_retrieve_body($response);
         $decoded = json_decode($rawBody, true);
-        $decodedBody = is_array($decoded) ? $decoded : ['raw' => $rawBody];
-        $responseOk = $status >= 200 && $status < 300;
-        $error = '';
-        if (
-            !$responseOk &&
-            isset($decodedBody['error']) &&
-            is_scalar($decodedBody['error'])
-        ) {
-            $error = sanitize_text_field((string)$decodedBody['error']);
-        }
 
-        $this->logger->log($responseOk ? 'info' : 'error', 'Worker request completed', [
+        $this->logger->log($status >= 200 && $status < 300 ? 'info' : 'error', 'Worker request completed', [
             'path' => $normalizedPath,
             'status' => (string)$status,
+            'request_id' => $requestId,
         ]);
 
         return [
-            'ok' => $responseOk,
+            'ok' => $status >= 200 && $status < 300,
             'status' => $status,
-            'error' => $error,
-            'body' => $decodedBody,
+            'body' => is_array($decoded) ? $decoded : ['raw' => $rawBody],
+            'request_id' => $requestId,
         ];
     }
 }

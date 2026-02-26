@@ -10,6 +10,8 @@ use WebAdminEdgeAgent\Admin\Tabs\UptimeTab;
 use WebAdminEdgeAgent\Api\Endpoints\AnalyticsGoogle;
 use WebAdminEdgeAgent\Api\Endpoints\AnalyticsGoalsAssistant;
 use WebAdminEdgeAgent\Api\Endpoints\Heartbeat;
+use WebAdminEdgeAgent\Api\Endpoints\PerformanceSlo;
+use WebAdminEdgeAgent\Api\Endpoints\SafeUpdates;
 use WebAdminEdgeAgent\Storage\JobStore;
 use WebAdminEdgeAgent\Storage\Logger;
 use WebAdminEdgeAgent\Storage\Options;
@@ -27,6 +29,10 @@ class Menu
 
     private AnalyticsGoalsAssistant $analyticsGoalsAssistant;
 
+    private PerformanceSlo $performanceSlo;
+
+    private SafeUpdates $safeUpdates;
+
     private TabState $tabState;
 
     private JobStore $jobStore;
@@ -37,6 +43,8 @@ class Menu
         Heartbeat $heartbeat,
         AnalyticsGoogle $analyticsGoogle,
         AnalyticsGoalsAssistant $analyticsGoalsAssistant,
+        PerformanceSlo $performanceSlo,
+        SafeUpdates $safeUpdates,
         TabState $tabState,
         JobStore $jobStore
     ) {
@@ -45,6 +53,8 @@ class Menu
         $this->heartbeat = $heartbeat;
         $this->analyticsGoogle = $analyticsGoogle;
         $this->analyticsGoalsAssistant = $analyticsGoalsAssistant;
+        $this->performanceSlo = $performanceSlo;
+        $this->safeUpdates = $safeUpdates;
         $this->tabState = $tabState;
         $this->jobStore = $jobStore;
     }
@@ -57,11 +67,16 @@ class Menu
         add_action('admin_post_webadmin_edge_agent_generate_analytics_api_key', [$this, 'handleGenerateAnalyticsApiKey']);
         add_action('admin_post_webadmin_edge_agent_generate_goal_plan', [$this, 'handleGenerateGoalPlan']);
         add_action('admin_post_webadmin_edge_agent_apply_goal_plan', [$this, 'handleApplyGoalPlan']);
+        add_action('admin_post_webadmin_edge_agent_save_slo_settings', [$this, 'handleSaveSloSettings']);
+        add_action('admin_post_webadmin_edge_agent_run_slo_evaluation', [$this, 'handleRunSloEvaluation']);
         add_action('admin_post_webadmin_edge_agent_send_heartbeat', [$this, 'handleSendHeartbeat']);
+        add_action('admin_post_webadmin_edge_agent_run_safe_update_workflow', [$this, 'handleRunSafeUpdateWorkflow']);
         add_action('admin_post_webadmin_edge_agent_start_google_connect', [$this, 'handleStartGoogleConnect']);
         add_action('admin_post_webadmin_edge_agent_refresh_google_status', [$this, 'handleRefreshGoogleStatus']);
         add_action('admin_post_webadmin_edge_agent_deploy_google_analytics', [$this, 'handleDeployGoogleAnalytics']);
         add_action('admin_post_webadmin_edge_agent_run_tab_sync', [$this, 'handleRunTabSync']);
+        add_action('admin_post_webadmin_edge_agent_export_support_bundle', [$this, 'handleExportSupportBundle']);
+        add_action('admin_post_webadmin_edge_agent_export_logs_json', [$this, 'handleExportLogsJson']);
     }
 
     public function registerMenu(): void
@@ -74,6 +89,15 @@ class Menu
             [$this, 'renderPage'],
             'dashicons-shield-alt',
             56
+        );
+
+        add_submenu_page(
+            'webadmin-edge-agent',
+            'WebAdmin Logs',
+            'Logs',
+            'manage_options',
+            'webadmin-edge-agent-logs',
+            [$this, 'renderLogsPage']
         );
     }
 
@@ -251,6 +275,82 @@ class Menu
         $this->redirectWithTab('uptime');
     }
 
+    public function handleSaveSloSettings(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized', 'webadmin-edge-agent'));
+        }
+
+        check_admin_referer('webadmin_edge_agent_save_slo_settings', 'webadmin_edge_agent_slo_settings_nonce');
+
+        $input = [
+            'performance_slo_goal_guest_p95_ttfb_ms' => isset($_POST['performance_slo_goal_guest_p95_ttfb_ms']) ? wp_unslash($_POST['performance_slo_goal_guest_p95_ttfb_ms']) : '',
+            'performance_slo_goal_error_rate_pct' => isset($_POST['performance_slo_goal_error_rate_pct']) ? wp_unslash($_POST['performance_slo_goal_error_rate_pct']) : '',
+            'performance_slo_goal_cache_hit_pct' => isset($_POST['performance_slo_goal_cache_hit_pct']) ? wp_unslash($_POST['performance_slo_goal_cache_hit_pct']) : '',
+            'performance_slo_dry_run' => isset($_POST['performance_slo_dry_run']) ? wp_unslash($_POST['performance_slo_dry_run']) : '0',
+        ];
+
+        $this->options->saveSettings($input);
+        $this->logger->log('info', 'Performance SLO settings updated');
+        add_settings_error('webadmin-edge-agent', 'slo-settings-saved', 'Performance SLO settings saved.', 'updated');
+
+        $this->redirectWithTab('uptime');
+    }
+
+    public function handleRunSloEvaluation(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized', 'webadmin-edge-agent'));
+        }
+
+        check_admin_referer('webadmin_edge_agent_run_slo_evaluation', 'webadmin_edge_agent_slo_run_nonce');
+
+        $response = $this->performanceSlo->evaluate('manual');
+        if (!empty($response['ok'])) {
+            add_settings_error('webadmin-edge-agent', 'slo-run-ok', 'Performance SLO evaluation completed.', 'updated');
+        } else {
+            $message = 'Performance SLO evaluation failed.';
+            if (!empty($response['error'])) {
+                $message .= ' ' . sanitize_text_field((string)$response['error']);
+            }
+            add_settings_error('webadmin-edge-agent', 'slo-run-error', $message, 'error');
+        }
+
+        $this->redirectWithTab('uptime');
+    }
+
+    public function handleRunSafeUpdateWorkflow(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized', 'webadmin-edge-agent'));
+        }
+
+        check_admin_referer('webadmin_edge_agent_run_safe_update_workflow', 'webadmin_edge_agent_safe_update_nonce');
+
+        $input = [
+            'safe_updates_include_core' => isset($_POST['safe_updates_include_core']) ? wp_unslash($_POST['safe_updates_include_core']) : '0',
+            'safe_updates_include_plugins' => isset($_POST['safe_updates_include_plugins']) ? wp_unslash($_POST['safe_updates_include_plugins']) : '0',
+            'safe_updates_include_themes' => isset($_POST['safe_updates_include_themes']) ? wp_unslash($_POST['safe_updates_include_themes']) : '0',
+            'safe_updates_plugin_allowlist' => isset($_POST['safe_updates_plugin_allowlist']) ? wp_unslash($_POST['safe_updates_plugin_allowlist']) : '',
+            'safe_updates_theme_allowlist' => isset($_POST['safe_updates_theme_allowlist']) ? wp_unslash($_POST['safe_updates_theme_allowlist']) : '',
+            'safe_updates_dry_run' => isset($_POST['safe_updates_dry_run']) ? wp_unslash($_POST['safe_updates_dry_run']) : '0',
+        ];
+        $this->options->saveSettings($input);
+
+        $response = $this->safeUpdates->run('manual');
+        if (!empty($response['ok'])) {
+            add_settings_error('webadmin-edge-agent', 'safe-update-run-ok', 'Safe updates workflow planned.', 'updated');
+        } else {
+            $message = 'Safe updates workflow failed.';
+            if (!empty($response['error'])) {
+                $message .= ' ' . sanitize_text_field((string)$response['error']);
+            }
+            add_settings_error('webadmin-edge-agent', 'safe-update-run-error', $message, 'error');
+        }
+
+        $this->redirectWithTab('security');
+    }
+
     public function handleStartGoogleConnect(): void
     {
         if (!current_user_can('manage_options')) {
@@ -263,7 +363,7 @@ class Menu
         $response = $this->analyticsGoogle->startConnect($returnUrl);
 
         if (!empty($response['ok']) && isset($response['body']['auth_url'])) {
-            wp_redirect(esc_url_raw((string)$response['body']['auth_url']));
+            wp_safe_redirect(esc_url_raw((string)$response['body']['auth_url']));
             exit;
         }
 
@@ -334,6 +434,146 @@ class Menu
         $this->redirectWithTab($tab);
     }
 
+    public function handleExportSupportBundle(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized', 'webadmin-edge-agent'));
+        }
+
+        check_admin_referer('webadmin_edge_agent_export_support_bundle', 'webadmin_edge_agent_export_support_bundle_nonce');
+
+        $tab = isset($_POST['tab']) ? sanitize_key((string)wp_unslash($_POST['tab'])) : 'uptime';
+        $archivePath = $this->buildSupportBundleArchive();
+        if (is_wp_error($archivePath)) {
+            $this->logger->log('error', 'Support bundle export failed', [
+                'reason' => (string)$archivePath->get_error_message(),
+            ]);
+            add_settings_error(
+                'webadmin-edge-agent',
+                'support-bundle-error',
+                'Support bundle export failed: ' . $archivePath->get_error_message(),
+                'error'
+            );
+            $this->redirectWithTab($tab);
+        }
+
+        $filename = sprintf('webadmin-edge-agent-support-bundle-%s.zip', gmdate('Ymd-His'));
+        $contentLength = filesize($archivePath);
+        header('Content-Type: application/zip');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        if ($contentLength !== false) {
+            header('Content-Length: ' . (string)$contentLength);
+        }
+        header('X-Content-Type-Options: nosniff');
+        readfile($archivePath);
+        @unlink($archivePath);
+
+        $this->logger->log('info', 'Support bundle exported', [
+            'filename' => $filename,
+        ]);
+
+        exit;
+    }
+
+    public function handleExportLogsJson(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized', 'webadmin-edge-agent'));
+        }
+
+        check_admin_referer('webadmin_edge_agent_export_logs_json', 'webadmin_edge_agent_export_logs_json_nonce');
+
+        $level = isset($_POST['level']) ? sanitize_key((string)wp_unslash($_POST['level'])) : '';
+        $search = isset($_POST['search']) ? sanitize_text_field((string)wp_unslash($_POST['search'])) : '';
+        $limit = isset($_POST['limit']) ? max(1, (int)wp_unslash($_POST['limit'])) : 500;
+
+        $json = $this->logger->exportJson($level, $search, $limit);
+        $filename = sprintf('webadmin-edge-agent-logs-%s.json', gmdate('Ymd-His'));
+
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('X-Content-Type-Options: nosniff');
+        echo $json; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+
+        $this->logger->log('info', 'Logs exported as JSON', [
+            'filename' => $filename,
+            'level' => $level,
+            'limit' => (string)$limit,
+        ]);
+
+        exit;
+    }
+
+    public function renderLogsPage(): void
+    {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        $level = isset($_GET['level']) ? sanitize_key((string)wp_unslash($_GET['level'])) : '';
+        $search = isset($_GET['s']) ? sanitize_text_field((string)wp_unslash($_GET['s'])) : '';
+        $limit = isset($_GET['limit']) ? max(1, (int)wp_unslash($_GET['limit'])) : 200;
+        $events = $this->logger->recent($limit, $level, $search);
+
+        settings_errors('webadmin-edge-agent');
+
+        echo '<div class="wrap webadmin-edge-agent">';
+        echo '<h1>WebAdmin Edge Agent Logs</h1>';
+
+        echo '<form method="get" action="' . esc_url(admin_url('admin.php')) . '" style="margin-bottom:12px;">';
+        echo '<input type="hidden" name="page" value="webadmin-edge-agent-logs" />';
+        echo '<label for="webadmin-edge-agent-log-level"><strong>Severity</strong></label> ';
+        echo '<select id="webadmin-edge-agent-log-level" name="level">';
+        echo '<option value=""' . selected($level, '', false) . '>All</option>';
+        echo '<option value="info"' . selected($level, 'info', false) . '>Info</option>';
+        echo '<option value="warning"' . selected($level, 'warning', false) . '>Warning</option>';
+        echo '<option value="error"' . selected($level, 'error', false) . '>Error</option>';
+        echo '</select> ';
+        echo '<label for="webadmin-edge-agent-log-search"><strong>Search</strong></label> ';
+        echo '<input id="webadmin-edge-agent-log-search" type="search" name="s" value="' . esc_attr($search) . '" placeholder="event, request_id, job_id" /> ';
+        echo '<label for="webadmin-edge-agent-log-limit"><strong>Limit</strong></label> ';
+        echo '<input id="webadmin-edge-agent-log-limit" type="number" min="1" max="1000" name="limit" value="' . esc_attr((string)$limit) . '" style="width:90px;" /> ';
+        echo '<button type="submit" class="button">Filter</button>';
+        echo '</form>';
+
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-bottom:16px;">';
+        wp_nonce_field('webadmin_edge_agent_export_logs_json', 'webadmin_edge_agent_export_logs_json_nonce');
+        echo '<input type="hidden" name="action" value="webadmin_edge_agent_export_logs_json" />';
+        echo '<input type="hidden" name="level" value="' . esc_attr($level) . '" />';
+        echo '<input type="hidden" name="search" value="' . esc_attr($search) . '" />';
+        echo '<input type="hidden" name="limit" value="' . esc_attr((string)$limit) . '" />';
+        echo '<button type="submit" class="button button-secondary">Export Filtered JSON</button> ';
+        echo '<a href="' . esc_url(admin_url('admin.php?page=webadmin-edge-agent')) . '" class="button">Back to Dashboard</a>';
+        echo '</form>';
+
+        if (empty($events)) {
+            echo '<p>No events match the current filter.</p>';
+            echo '</div>';
+            return;
+        }
+
+        echo '<table class="widefat striped">';
+        echo '<thead><tr><th>Timestamp (UTC)</th><th>Level</th><th>Event</th><th>Request ID</th><th>Job ID</th><th>Context</th></tr></thead>';
+        echo '<tbody>';
+        foreach ($events as $event) {
+            if (!is_array($event)) {
+                continue;
+            }
+            $context = isset($event['context']) && is_array($event['context']) ? wp_json_encode($event['context']) : '';
+            echo '<tr>';
+            echo '<td>' . esc_html((string)($event['ts'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string)($event['level'] ?? 'info')) . '</td>';
+            echo '<td>' . esc_html((string)($event['event'] ?? ($event['message'] ?? ''))) . '</td>';
+            echo '<td><code>' . esc_html((string)($event['request_id'] ?? '')) . '</code></td>';
+            echo '<td><code>' . esc_html((string)($event['job_id'] ?? '')) . '</code></td>';
+            echo '<td><code>' . esc_html((string)$context) . '</code></td>';
+            echo '</tr>';
+        }
+        echo '</tbody>';
+        echo '</table>';
+        echo '</div>';
+    }
+
     public function renderPage(): void
     {
         if (!current_user_can('manage_options')) {
@@ -361,6 +601,7 @@ class Menu
 
         echo '<div class="wrap webadmin-edge-agent">';
         echo '<h1>WebAdmin Edge Agent</h1>';
+        $this->renderSupportActions($currentTab);
         echo '<h2 class="nav-tab-wrapper">';
 
         foreach ($tabs as $key => $tabData) {
@@ -381,7 +622,9 @@ class Menu
         }
 
         if ($tabObject instanceof SecurityTab) {
-            $tabObject->render();
+            $tabObject->render([
+                'settings' => $settings,
+            ]);
         }
 
         if ($tabObject instanceof AnalyticsTab) {
@@ -453,6 +696,16 @@ class Menu
                 add_settings_error('webadmin-edge-agent', 'tab-run-ok', 'Run now completed for Analytics & Reporting.', 'updated');
             } else {
                 add_settings_error('webadmin-edge-agent', 'tab-run-error', 'Run now failed for Analytics & Reporting.', 'error');
+            }
+            return;
+        }
+
+        if ($tab === 'security') {
+            $response = $this->safeUpdates->run('manual_run');
+            if (!empty($response['ok'])) {
+                add_settings_error('webadmin-edge-agent', 'tab-run-ok', 'Run now completed for Security.', 'updated');
+            } else {
+                add_settings_error('webadmin-edge-agent', 'tab-run-error', 'Run now failed for Security.', 'error');
             }
             return;
         }
@@ -557,6 +810,7 @@ class Menu
 
         echo '<hr/>';
         echo '<h2>Last 100 Events</h2>';
+        echo '<p><a href="' . esc_url(admin_url('admin.php?page=webadmin-edge-agent-logs')) . '" class="button button-secondary">Open Full Logs</a></p>';
 
         if (empty($events)) {
             echo '<p>No events recorded yet.</p>';
@@ -564,7 +818,7 @@ class Menu
         }
 
         echo '<table class="widefat striped">';
-        echo '<thead><tr><th>Timestamp (UTC)</th><th>Level</th><th>Message</th><th>Context</th></tr></thead>';
+        echo '<thead><tr><th>Timestamp (UTC)</th><th>Level</th><th>Event</th><th>Request ID</th><th>Job ID</th><th>Context</th></tr></thead>';
         echo '<tbody>';
 
         foreach ($events as $event) {
@@ -575,13 +829,217 @@ class Menu
             echo '<tr>';
             echo '<td>' . esc_html((string)($event['ts'] ?? '')) . '</td>';
             echo '<td>' . esc_html((string)($event['level'] ?? 'info')) . '</td>';
-            echo '<td>' . esc_html((string)($event['message'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string)($event['event'] ?? ($event['message'] ?? ''))) . '</td>';
+            echo '<td><code>' . esc_html((string)($event['request_id'] ?? '')) . '</code></td>';
+            echo '<td><code>' . esc_html((string)($event['job_id'] ?? '')) . '</code></td>';
             echo '<td><code>' . esc_html((string)$context) . '</code></td>';
             echo '</tr>';
         }
 
         echo '</tbody>';
         echo '</table>';
+    }
+
+    private function renderSupportActions(string $tab): void
+    {
+        echo '<div style="display:flex;gap:8px;align-items:center;margin:12px 0 16px;">';
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;">';
+        wp_nonce_field('webadmin_edge_agent_export_support_bundle', 'webadmin_edge_agent_export_support_bundle_nonce');
+        echo '<input type="hidden" name="action" value="webadmin_edge_agent_export_support_bundle" />';
+        echo '<input type="hidden" name="tab" value="' . esc_attr($tab) . '" />';
+        echo '<button type="submit" class="button button-primary">Download Support Bundle</button>';
+        echo '</form>';
+        echo '<a href="' . esc_url(admin_url('admin.php?page=webadmin-edge-agent-logs')) . '" class="button">Open Logs</a>';
+        echo '</div>';
+    }
+
+    /**
+     * @return string|\WP_Error
+     */
+    private function buildSupportBundleArchive()
+    {
+        if (!class_exists('\ZipArchive')) {
+            return new \WP_Error('ziparchive_missing', 'PHP ZipArchive extension is required to export support bundles.');
+        }
+
+        $settings = $this->options->getSettings();
+        $redactedSettings = $this->redactedSettings($settings);
+        $jobs = $this->jobStore->recent(20);
+        $siteInventory = $this->siteInventory();
+
+        $files = [
+            'manifest.json' => wp_json_encode([
+                'generated_at' => gmdate('c'),
+                'plugin' => 'webadmin-edge-agent',
+                'sections' => [
+                    'settings/redacted-settings.json',
+                    'environment/site-inventory.json',
+                    'logs/recent-500.json',
+                    'jobs/recent-20.json',
+                    'state/performance-slo-last-result.json',
+                    'state/safe-updates-last-result.json',
+                    'state/analytics-google-last-deploy.json',
+                ],
+            ], JSON_PRETTY_PRINT),
+            'settings/redacted-settings.json' => wp_json_encode($redactedSettings, JSON_PRETTY_PRINT),
+            'environment/site-inventory.json' => wp_json_encode($siteInventory, JSON_PRETTY_PRINT),
+            'logs/recent-500.json' => $this->logger->exportJson('', '', 500),
+            'jobs/recent-20.json' => wp_json_encode([
+                'generated_at' => gmdate('c'),
+                'count' => count($jobs),
+                'jobs' => $jobs,
+            ], JSON_PRETTY_PRINT),
+            'state/performance-slo-last-result.json' => wp_json_encode($this->decodeJsonOrRaw((string)($settings['performance_slo_last_result_json'] ?? '')), JSON_PRETTY_PRINT),
+            'state/safe-updates-last-result.json' => wp_json_encode($this->decodeJsonOrRaw((string)($settings['safe_updates_last_result_json'] ?? '')), JSON_PRETTY_PRINT),
+            'state/analytics-google-last-deploy.json' => wp_json_encode($this->decodeJsonOrRaw((string)($settings['analytics_google_last_deploy_json'] ?? '')), JSON_PRETTY_PRINT),
+        ];
+
+        $tmpZip = wp_tempnam('webadmin-edge-agent-support-bundle');
+        if (!is_string($tmpZip) || $tmpZip === '') {
+            return new \WP_Error('tmpzip_failed', 'Could not allocate a temporary file for support bundle export.');
+        }
+
+        $zip = new \ZipArchive();
+        $openResult = $zip->open($tmpZip, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
+        if ($openResult !== true) {
+            @unlink($tmpZip);
+            return new \WP_Error('zip_open_failed', 'Could not open support bundle archive for writing.');
+        }
+
+        foreach ($files as $path => $content) {
+            $normalized = is_string($content) ? $content : '{"ok":false,"error":"bundle_content_encode_failed"}';
+            $zip->addFromString($path, $normalized);
+        }
+
+        $zip->close();
+
+        return $tmpZip;
+    }
+
+    /**
+     * @param array<string, mixed> $settings
+     * @return array<string, mixed>
+     */
+    private function redactedSettings(array $settings): array
+    {
+        $redacted = [];
+        foreach ($settings as $key => $value) {
+            $normalizedKey = (string)$key;
+            if ($this->isSensitiveSettingKey($normalizedKey)) {
+                $redacted[$normalizedKey] = $value === '' ? '' : '[redacted]';
+                continue;
+            }
+
+            if (is_array($value)) {
+                $redacted[$normalizedKey] = wp_json_encode($value);
+                continue;
+            }
+
+            $redacted[$normalizedKey] = is_scalar($value) ? (string)$value : '';
+        }
+
+        return $redacted;
+    }
+
+    private function isSensitiveSettingKey(string $key): bool
+    {
+        $sensitive = [
+            'shared_secret',
+            'capability_token_uptime',
+            'capability_token_analytics',
+            'analytics_google_session_id',
+        ];
+        if (in_array($key, $sensitive, true)) {
+            return true;
+        }
+
+        return strpos($key, 'secret') !== false
+            || strpos($key, 'token') !== false
+            || strpos($key, 'session') !== false;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function siteInventory(): array
+    {
+        if (!function_exists('get_plugins')) {
+            require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        }
+
+        $allPlugins = function_exists('get_plugins') ? get_plugins() : [];
+        $activePluginFiles = get_option('active_plugins', []);
+        if (!is_array($activePluginFiles)) {
+            $activePluginFiles = [];
+        }
+
+        $activePlugins = [];
+        foreach ($activePluginFiles as $pluginFile) {
+            $pluginPath = (string)$pluginFile;
+            $meta = isset($allPlugins[$pluginPath]) && is_array($allPlugins[$pluginPath]) ? $allPlugins[$pluginPath] : [];
+            $activePlugins[] = [
+                'plugin' => $pluginPath,
+                'name' => isset($meta['Name']) ? (string)$meta['Name'] : $pluginPath,
+                'version' => isset($meta['Version']) ? (string)$meta['Version'] : '',
+            ];
+        }
+
+        $themes = wp_get_themes();
+        $themeRows = [];
+        foreach ($themes as $stylesheet => $theme) {
+            $themeRows[] = [
+                'stylesheet' => (string)$stylesheet,
+                'name' => (string)$theme->get('Name'),
+                'version' => (string)$theme->get('Version'),
+                'status' => $theme->is_allowed() ? 'allowed' : 'blocked',
+                'active' => wp_get_theme()->get_stylesheet() === $stylesheet,
+            ];
+        }
+
+        return [
+            'generated_at' => gmdate('c'),
+            'site_url' => home_url('/'),
+            'home_url' => home_url('/'),
+            'wp_version' => get_bloginfo('version'),
+            'php_version' => PHP_VERSION,
+            'active_theme' => [
+                'stylesheet' => wp_get_theme()->get_stylesheet(),
+                'name' => wp_get_theme()->get('Name'),
+                'version' => wp_get_theme()->get('Version'),
+            ],
+            'active_plugins_count' => count($activePlugins),
+            'active_plugins' => $activePlugins,
+            'themes' => $themeRows,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function decodeJsonOrRaw(string $value): array
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return [
+                'present' => false,
+                'value' => null,
+            ];
+        }
+
+        $decoded = json_decode($trimmed, true);
+        if (is_array($decoded)) {
+            return [
+                'present' => true,
+                'value' => $decoded,
+            ];
+        }
+
+        return [
+            'present' => true,
+            'value' => null,
+            'raw' => $trimmed,
+            'parse_error' => 'invalid_json',
+        ];
     }
 
     private function redirectWithTab(string $tab): void
