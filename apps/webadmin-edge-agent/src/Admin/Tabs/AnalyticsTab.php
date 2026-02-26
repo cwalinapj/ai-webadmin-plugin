@@ -202,12 +202,18 @@ class AnalyticsTab
         </form>
 
         <h3>One-Click Deploy</h3>
-        <p>Deploy GTM triggers/tags and GA4 conversion events directly via Google APIs.</p>
+        <p>Preview, deploy, verify, and rollback-plan GTM/GA4 changes from one workflow.</p>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-bottom:8px;">
+          <?php wp_nonce_field('webadmin_edge_agent_preview_google_analytics', 'webadmin_edge_agent_google_preview_nonce'); ?>
+          <input type="hidden" name="action" value="webadmin_edge_agent_preview_google_analytics" />
+          <button type="submit" class="button">Preview Changes (Dry Run)</button>
+        </form>
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
           <?php wp_nonce_field('webadmin_edge_agent_deploy_google_analytics', 'webadmin_edge_agent_google_deploy_nonce'); ?>
           <input type="hidden" name="action" value="webadmin_edge_agent_deploy_google_analytics" />
-          <button type="submit" class="button button-primary">Deploy GTM + GA4 Conversions</button>
+          <button type="submit" class="button button-primary">Deploy + Verify GTM &amp; GA4</button>
         </form>
+        <p class="description">If verification fails, the system flags rollback recommendation in deploy details.</p>
         <p>
           Last deploy status: <?php echo esc_html($googleDeployStatus); ?>
         </p>
