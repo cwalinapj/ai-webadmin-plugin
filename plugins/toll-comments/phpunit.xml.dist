@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<phpunit bootstrap="tests/bootstrap.php" colors="true">
+  <testsuites>
+    <testsuite name="Toll Comments">
+      <directory suffix="Test.php">tests</directory>
+    </testsuite>
+  </testsuites>
+  <php>
+    <env name="WP_TESTS_DIR" value="/tmp/wordpress-tests-lib"/>
+    <env name="WP_PHPUNIT__DIR" value="/tmp/wordpress-tests-lib"/>
+    <env name="WP_TESTS_PHPUNIT_POLYFILLS_PATH" value="/tmp/wp-phpunit-polyfills"/>
+    <env name="WP_CORE_DIR" value="/tmp/wordpress-tests-lib/src"/>
+  </php>
+</phpunit>
