@@ -21,6 +21,17 @@ class UptimeTab
         $sloLastStatus = (string)($settings['performance_slo_last_status'] ?? 'never');
         $sloLastMessage = (string)($settings['performance_slo_last_message'] ?? '');
         $sloLastResult = (string)($settings['performance_slo_last_result_json'] ?? '');
+        $sloNextActions = [];
+        if ($sloLastResult !== '') {
+            $decodedSlo = json_decode($sloLastResult, true);
+            if (is_array($decodedSlo) && isset($decodedSlo['recommended_next_actions']) && is_array($decodedSlo['recommended_next_actions'])) {
+                foreach ($decodedSlo['recommended_next_actions'] as $action) {
+                    if (is_string($action) && $action !== '') {
+                        $sloNextActions[] = $action;
+                    }
+                }
+            }
+        }
 
         ?>
         <h2>Connect</h2>
@@ -97,6 +108,7 @@ class UptimeTab
 
         <h2>Performance SLO Mode</h2>
         <p>Define measurable goals, run benchmark-driven strategy, and keep canary+rollback guardrails active.</p>
+        <p><em>Guest p95 TTFB and cache-hit signals are measured by the Worker control plane, not origin-local probes.</em></p>
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
           <?php wp_nonce_field('webadmin_edge_agent_save_slo_settings', 'webadmin_edge_agent_slo_settings_nonce'); ?>
           <input type="hidden" name="action" value="webadmin_edge_agent_save_slo_settings" />
@@ -149,6 +161,14 @@ class UptimeTab
             <summary>SLO evaluation details</summary>
             <pre style="max-height:280px; overflow:auto;"><?php echo esc_html($sloLastResult); ?></pre>
           </details>
+        <?php endif; ?>
+        <?php if (!empty($sloNextActions)) : ?>
+          <h3>Recommended Next Actions</h3>
+          <ol>
+            <?php foreach ($sloNextActions as $action) : ?>
+              <li><?php echo esc_html($action); ?></li>
+            <?php endforeach; ?>
+          </ol>
         <?php endif; ?>
         <?php
     }
