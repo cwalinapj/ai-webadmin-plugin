@@ -1,0 +1,22 @@
+{
+  "name": "ai-webadmin-plugin-update-feed",
+  "generated_at": "2026-02-26T00:00:00Z",
+  "plugins": {
+    "ai-webadmin": {
+      "slug": "ai-webadmin",
+      "version": "0.2.0",
+      "download_url": "https://example.com/releases/ai-webadmin-0.2.0.zip",
+      "requires": "6.0",
+      "tested": "6.8",
+      "requires_php": "7.4"
+    },
+    "tolldns": {
+      "slug": "tolldns",
+      "version": "0.1.0",
+      "download_url": "https://example.com/releases/tolldns-0.1.0.zip",
+      "requires": "6.0",
+      "tested": "6.8",
+      "requires_php": "7.4"
+    }
+  }
+}
