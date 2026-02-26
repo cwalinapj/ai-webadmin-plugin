@@ -9,7 +9,9 @@ This repo is now organized as a multi-product suite (not web3-only):
 - `apps/panel-addon-core`: scaffold for non-WordPress control-panel addons.
 - `apps/ai-vps-control-panel`: AI-chat-operated VPS control-panel backend scaffold.
 - `plugins/ai-webadmin`: legacy all-in-one AI WebAdmin plugin.
-- `plugins/tolldns`: TollDNS helper plugin.
+- [`plugins/tolldns`](plugins/tolldns/README.md): TollDNS helper plugin — part of the [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-) platform.
+- [`plugins/toll-comments`](plugins/toll-comments/README.md): DDNS Toll Comments — refundable credit-based comment spam protection (merged from [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-)).
+- [`plugins/wp-optin`](plugins/wp-optin/README.md): DDNS Opt-in — connect a WordPress site to the DECENTRALIZED-DNS control plane (merged from [DECENTRALIZED-DNS](https://github.com/cwalinapj/DECENTRALIZED-DNS-)).
 - `plugins/ai-wp-host-optimizer`: host baseline and VPS recommendation telemetry plugin.
 - `plugins/ai-addwords-meta-plugin`: paid traffic AI orchestration + CPA/Web3 settlement plugin.
 
@@ -34,6 +36,8 @@ repo/
   plugins/
     ai-webadmin/
     tolldns/
+    toll-comments/
+    wp-optin/
     ai-wp-host-optimizer/
     ai-addwords-meta-plugin/
   docs/
@@ -150,6 +154,21 @@ Claims are serialized with a Durable Object lock so multiple agents do not claim
 Agents can also share a conflict pool for blocked work, read active conflicts, and resolve/dismiss them after remediation.
 All sandbox routes use signed plugin auth and require capability token `CAP_TOKEN_SANDBOX_WRITE`.
 
+## Analytics Google deploy (OAuth + one-click conversions)
+
+New worker routes:
+- `POST /plugin/wp/analytics/google/connect/start`
+- `POST /plugin/wp/analytics/google/status`
+- `POST /plugin/wp/analytics/google/deploy`
+- `GET /oauth/google/callback`
+
+Plugin tab:
+- `Analytics & Reporting` now supports:
+  - Connect Google account (OAuth)
+  - Save GA4/GTM IDs + analytics capability token
+  - One-click deploy for GTM tags/triggers and GA4 conversions
+  - Optional GTM snippet + conversion event bridge injection
+
 ## Tests
 
 ### Worker tests (includes Ethereum + Solana wallet verify tests)
@@ -167,6 +186,13 @@ composer install
 composer test
 ```
 
+### Toll Comments PHP tests
+
+```bash
+cd plugins/toll-comments
+phpunit
+```
+
 ## Build installable edge-agent zip
 
 ```bash
@@ -181,7 +207,7 @@ Artifact:
 GitHub Actions workflow:
 - Runs worker tests (including Ethereum/Solana wallet-login verification path).
 - Runs WordPress edge-agent PHPUnit suite.
-- Runs PHP lint for `plugins/ai-webadmin`, `plugins/tolldns`, and `plugins/ai-addwords-meta-plugin`.
+- Runs PHP lint for `plugins/ai-webadmin`, `plugins/tolldns`, `plugins/toll-comments`, `plugins/wp-optin`, and `plugins/ai-addwords-meta-plugin`.
 
 ## GitHub repo rename
 
