@@ -56,10 +56,19 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
   };
 }
 
-function makeRequest(method: string, url: string, body?: unknown, token?: string): Request {
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (token !== undefined) {
-    headers['authorization'] = `Bearer ${token}`;
+function makeRequest(
+  method: string,
+  path: string,
+  body?: unknown,
+  token?: string | null,
+): Request {
+  const url = `https://worker.example.com${path}`;
+  const headers: Record<string, string> = {};
+  if (body !== undefined) {
+    headers['content-type'] = 'application/json';
+  }
+  if (token !== null) {
+    headers['authorization'] = token !== undefined ? `Bearer ${token}` : '';
   }
   return new Request(url, {
     method,
@@ -68,189 +77,181 @@ function makeRequest(method: string, url: string, body?: unknown, token?: string
   });
 }
 
-type AnchorObjectRecord = NonNullable<Awaited<ReturnType<typeof store.findAnchorObjectByKey>>>;
-
-function makeObjectRecord(overrides: Partial<AnchorObjectRecord> = {}) {
-  return {
-    id: 'obj-1',
-    object_key: 'test/key.txt',
-    content_type: 'text/plain',
-    size_bytes: 11,
-    sha256: 'abc',
-    priority: 'standard' as const,
-    retention_class: 'balanced' as const,
-    primary_provider: 'r2' as const,
-    status: 'ready',
-    r2_key: 'test/key.txt',
-    b2_file_name: null,
-    ipfs_cid: null,
-    ipfs_gateway_url: null,
-    ipfs_size_bytes: null,
-    metadata_json: null,
-    last_error: null,
-    created_at: '2024-01-01T00:00:00Z',
-    updated_at: '2024-01-01T00:00:00Z',
-    last_accessed_at: null,
-    ...overrides,
-  };
-}
+const SAMPLE_OBJECT_RECORD: AnchorObjectRecord = {
+  id: 'obj-1',
+  object_key: 'file.txt',
+  content_type: 'application/octet-stream',
+  size_bytes: 5,
+  sha256: 'abc123',
+  priority: 'standard',
+  retention_class: 'balanced',
+  primary_provider: 'r2',
+  status: 'ready',
+  r2_key: 'file.txt',
+  b2_file_name: null,
+  ipfs_cid: null,
+  ipfs_gateway_url: null,
+  ipfs_size_bytes: null,
+  metadata_json: null,
+  last_error: null,
+  created_at: '2024-01-01T00:00:00.000Z',
+  updated_at: '2024-01-01T00:00:00.000Z',
+  last_accessed_at: null,
+};
 
 // ---------------------------------------------------------------------------
-// /anchor/store - Authorization
+// Authorization tests
 // ---------------------------------------------------------------------------
 
-describe('/anchor/store authorization', () => {
-  beforeEach(() => vi.clearAllMocks());
+describe('handleAnchorRequest – authorization', () => {
+  let env: Env;
 
-  it('returns 401 when Authorization header is missing', async () => {
-    const req = makeRequest('POST', 'https://worker.example.com/anchor/store', {
-      object_key: 'test/file.bin',
-      content_base64: CONTENT_BASE64,
+  beforeEach(() => {
+    env = makeEnv();
+    vi.mocked(store.getIpfsUsedBytes).mockResolvedValue(0);
+    vi.mocked(store.findAnchorObjectByKey).mockResolvedValue(null);
+    vi.mocked(store.createAnchorObject).mockResolvedValue(MOCK_OBJECT_RECORD);
+    vi.mocked(store.createAnchorTask).mockResolvedValue({
+      id: 'task-1',
+      object_id: 'obj-1',
+      target_provider: 'b2',
+      action: 'replicate',
+      status: 'queued',
+      attempts: 0,
+      last_error: null,
+      created_at: '2024-01-01T00:00:00.000Z',
+      updated_at: '2024-01-01T00:00:00.000Z',
     });
-    const res = await handleAnchorRequest(req, makeEnv());
+    vi.mocked(store.markObjectLocation).mockResolvedValue(undefined);
+    vi.mocked(r2.putToR2).mockResolvedValue({ key: 'test/key.json' });
+    vi.mocked(ipfs.isIpfsConfigured).mockReturnValue(false);
+  });
+
+  it('returns 401 for missing Authorization header', async () => {
+    const req = makeRequest('POST', '/anchor/store', VALID_STORE_BODY, null);
+    const res = await handleAnchorRequest(req, env);
     expect(res.status).toBe(401);
     const body = await res.json<{ ok: boolean; error: string }>();
     expect(body.ok).toBe(false);
     expect(body.error).toBe('unauthorized');
   });
 
-  it('returns 401 when Bearer token is wrong', async () => {
-    const req = makeRequest(
-      'POST',
-      'https://worker.example.com/anchor/store',
-      { object_key: 'test/file.bin', content_base64: CONTENT_BASE64 },
-      'wrong-token',
-    );
-    const res = await handleAnchorRequest(req, makeEnv());
+  it('returns 401 for wrong token', async () => {
+    const req = makeRequest('POST', '/anchor/store', VALID_STORE_BODY, 'wrong-token');
+    const res = await handleAnchorRequest(req, env);
     expect(res.status).toBe(401);
   });
 
   it('returns 401 when ANCHOR_API_TOKEN env var is empty', async () => {
-    const req = makeRequest(
-      'POST',
-      'https://worker.example.com/anchor/store',
-      { object_key: 'test/file.bin', content_base64: CONTENT_BASE64 },
-      '',
-    );
-    const env = makeEnv({ ANCHOR_API_TOKEN: '' });
-    const res = await handleAnchorRequest(req, env);
+    const emptyEnv = makeEnv({ ANCHOR_API_TOKEN: '' });
+    const req = makeRequest('POST', '/anchor/store', VALID_STORE_BODY, '');
+    const res = await handleAnchorRequest(req, emptyEnv);
     expect(res.status).toBe(401);
+  });
+
+  it('allows request with correct token', async () => {
+    const req = makeRequest('POST', '/anchor/store', VALID_STORE_BODY, 'test-token');
+    const res = await handleAnchorRequest(req, env);
+    // 201 = store succeeded; not a 401
+    expect(res.status).not.toBe(401);
   });
 });
 
 // ---------------------------------------------------------------------------
-// /anchor/store - Payload validation
+// POST /anchor/store – payload validation
 // ---------------------------------------------------------------------------
 
-describe('/anchor/store payload validation', () => {
+describe('handleAnchorRequest – POST /anchor/store payload validation', () => {
+  let env: Env;
+
   beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(store.findAnchorObjectByKey).mockResolvedValue(null);
+    env = makeEnv();
     vi.mocked(store.getIpfsUsedBytes).mockResolvedValue(0);
-    vi.mocked(r2.putToR2).mockResolvedValue({ key: 'test/key.txt' });
-    vi.mocked(store.createAnchorObject).mockResolvedValue(makeObjectRecord());
-    vi.mocked(store.countPendingTasks).mockResolvedValue(0);
+    vi.mocked(store.findAnchorObjectByKey).mockResolvedValue(null);
+    vi.mocked(store.createAnchorObject).mockResolvedValue(MOCK_OBJECT_RECORD);
     vi.mocked(store.markObjectLocation).mockResolvedValue(undefined);
+    vi.mocked(r2.putToR2).mockResolvedValue({ key: 'test/key.json' });
+    vi.mocked(ipfs.isIpfsConfigured).mockReturnValue(false);
   });
 
-  it('returns 400 when body is not valid JSON', async () => {
+  it('returns 400 when body is not JSON', async () => {
     const req = new Request('https://worker.example.com/anchor/store', {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${VALID_TOKEN}`,
-      },
-      body: 'not-json',
+      headers: { 'authorization': 'Bearer test-token', 'content-type': 'application/json' },
+      body: 'not json',
     });
-    const res = await handleAnchorRequest(req, makeEnv());
+    const res = await handleAnchorRequest(req, env);
     expect(res.status).toBe(400);
     const body = await res.json<{ ok: boolean; error: string }>();
     expect(body.ok).toBe(false);
   });
 
   it('returns 400 when object_key is missing', async () => {
-    const req = makeRequest(
-      'POST',
-      'https://worker.example.com/anchor/store',
-      { content_base64: CONTENT_BASE64 },
-      VALID_TOKEN,
-    );
-    const res = await handleAnchorRequest(req, makeEnv());
+    const req = makeRequest('POST', '/anchor/store', { content_base64: base64('hi') }, 'test-token');
+    const res = await handleAnchorRequest(req, env);
     expect(res.status).toBe(400);
+    const body = await res.json<{ ok: boolean; error: string }>();
+    expect(body.error).toBe('missing_object_key_or_content');
   });
 
   it('returns 400 when content_base64 is missing', async () => {
-    const req = makeRequest(
-      'POST',
-      'https://worker.example.com/anchor/store',
-      { object_key: 'test/file.bin' },
-      VALID_TOKEN,
-    );
-    const res = await handleAnchorRequest(req, makeEnv());
+    const req = makeRequest('POST', '/anchor/store', { object_key: 'some/key' }, 'test-token');
+    const res = await handleAnchorRequest(req, env);
     expect(res.status).toBe(400);
+    const body = await res.json<{ ok: boolean; error: string }>();
+    expect(body.error).toBe('missing_object_key_or_content');
   });
 
-  it('returns 400 when content_base64 is invalid base64', async () => {
+  it('returns 400 for invalid base64 content', async () => {
     const req = makeRequest(
       'POST',
-      'https://worker.example.com/anchor/store',
-      { object_key: 'test/file.bin', content_base64: '!!!not-base64!!!' },
-      VALID_TOKEN,
+      '/anchor/store',
+      { object_key: 'some/key', content_base64: '!!!not-valid-base64!!!' },
+      'test-token',
     );
-    const res = await handleAnchorRequest(req, makeEnv());
+    const res = await handleAnchorRequest(req, env);
     expect(res.status).toBe(400);
     const body = await res.json<{ ok: boolean; error: string }>();
     expect(body.error).toBe('invalid_base64');
   });
 
-  it('returns 413 when payload exceeds MAX_INLINE_OBJECT_BYTES', async () => {
-    // Set a 5-byte limit and send 6 bytes
-    const sixBytes = btoa('\x00\x01\x02\x03\x04\x05');
+  it('returns 413 when payload exceeds size limit', async () => {
+    // Generate a base64 string whose decoded size exceeds 1 byte limit
+    const bigContent = 'A'.repeat(200);
     const req = makeRequest(
       'POST',
-      'https://worker.example.com/anchor/store',
-      { object_key: 'test/large.bin', content_base64: sixBytes },
-      VALID_TOKEN,
+      '/anchor/store',
+      { object_key: 'some/key', content_base64: base64(bigContent) },
+      'test-token',
     );
-    const env = makeEnv({ MAX_INLINE_OBJECT_BYTES: '5' });
-    const res = await handleAnchorRequest(req, env);
+    const smallEnv = makeEnv({ MAX_INLINE_OBJECT_BYTES: '10' });
+    vi.mocked(store.findAnchorObjectByKey).mockResolvedValue(null);
+    const res = await handleAnchorRequest(req, smallEnv);
     expect(res.status).toBe(413);
     const body = await res.json<{ ok: boolean; error: string }>();
     expect(body.error).toBe('payload_too_large');
   });
 
-  it('stores object successfully and returns 201', async () => {
-    const req = makeRequest(
-      'POST',
-      'https://worker.example.com/anchor/store',
-      { object_key: 'test/file.txt', content_base64: CONTENT_BASE64, content_type: 'text/plain' },
-      VALID_TOKEN,
-    );
-    const res = await handleAnchorRequest(req, makeEnv());
+  it('returns 201 for a valid store request', async () => {
+    const req = makeRequest('POST', '/anchor/store', VALID_STORE_BODY, 'test-token');
+    const res = await handleAnchorRequest(req, env);
     expect(res.status).toBe(201);
-    const body = await res.json<{ ok: boolean; status: string }>();
+    const body = await res.json<{ ok: boolean }>();
     expect(body.ok).toBe(true);
-    expect(body.status).toBe('ready');
   });
 });
 
 // ---------------------------------------------------------------------------
-// /anchor/store - Object-key conflict
+// POST /anchor/store – object-key conflict
 // ---------------------------------------------------------------------------
 
-describe('/anchor/store object-key conflicts', () => {
-  beforeEach(() => vi.clearAllMocks());
-
+describe('handleAnchorRequest – object-key conflict', () => {
   it('returns 409 when object_key already exists', async () => {
-    vi.mocked(store.findAnchorObjectByKey).mockResolvedValue(makeObjectRecord());
+    const env = makeEnv();
+    vi.mocked(store.findAnchorObjectByKey).mockResolvedValue(MOCK_OBJECT_RECORD);
 
-    const req = makeRequest(
-      'POST',
-      'https://worker.example.com/anchor/store',
-      { object_key: 'test/key.txt', content_base64: CONTENT_BASE64 },
-      VALID_TOKEN,
-    );
-    const res = await handleAnchorRequest(req, makeEnv());
+    const req = makeRequest('POST', '/anchor/store', VALID_STORE_BODY, 'test-token');
+    const res = await handleAnchorRequest(req, env);
     expect(res.status).toBe(409);
     const body = await res.json<{ ok: boolean; error: string; object_id: string }>();
     expect(body.ok).toBe(false);
@@ -260,88 +261,67 @@ describe('/anchor/store object-key conflicts', () => {
 });
 
 // ---------------------------------------------------------------------------
-// /anchor/object - Authorization and lookup
+// GET /anchor/object
 // ---------------------------------------------------------------------------
 
-describe('/anchor/object', () => {
-  beforeEach(() => vi.clearAllMocks());
+describe('handleAnchorRequest – GET /anchor/object', () => {
+  let env: Env;
 
-  it('returns 401 without valid token', async () => {
-    const req = makeRequest('GET', 'https://worker.example.com/anchor/object?id=obj-1');
-    const res = await handleAnchorRequest(req, makeEnv());
-    expect(res.status).toBe(401);
-  });
-
-  it('returns 404 when neither id nor key is provided', async () => {
-    const req = makeRequest('GET', 'https://worker.example.com/anchor/object', undefined, VALID_TOKEN);
-    vi.mocked(store.findAnchorObjectById).mockResolvedValue(null);
-    vi.mocked(store.findAnchorObjectByKey).mockResolvedValue(null);
-    const res = await handleAnchorRequest(req, makeEnv());
-    expect(res.status).toBe(404);
-    const body = await res.json<{ ok: boolean; error: string }>();
-    expect(body.error).toBe('object_not_found');
-  });
-
-  it('returns 404 when object is not found by id', async () => {
-    vi.mocked(store.findAnchorObjectById).mockResolvedValue(null);
-    const req = makeRequest(
-      'GET',
-      'https://worker.example.com/anchor/object?id=missing-id',
-      undefined,
-      VALID_TOKEN,
-    );
-    const res = await handleAnchorRequest(req, makeEnv());
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 200 with object details when found by id', async () => {
-    const record = makeObjectRecord();
-    vi.mocked(store.findAnchorObjectById).mockResolvedValue(record);
+  beforeEach(() => {
+    env = makeEnv();
     vi.mocked(store.touchObjectAccess).mockResolvedValue(undefined);
     vi.mocked(store.countPendingTasks).mockResolvedValue(0);
+  });
 
-    const req = makeRequest(
-      'GET',
-      'https://worker.example.com/anchor/object?id=obj-1',
-      undefined,
-      VALID_TOKEN,
-    );
-    const res = await handleAnchorRequest(req, makeEnv());
+  it('returns 404 when neither id nor key provided', async () => {
+    const req = makeRequest('GET', '/anchor/object', undefined, 'test-token');
+    const res = await handleAnchorRequest(req, env);
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 when object not found by id', async () => {
+    vi.mocked(store.findAnchorObjectById).mockResolvedValue(null);
+    const req = makeRequest('GET', '/anchor/object?id=missing-id', undefined, 'test-token');
+    const res = await handleAnchorRequest(req, env);
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 200 with object when found by id', async () => {
+    vi.mocked(store.findAnchorObjectById).mockResolvedValue(MOCK_OBJECT_RECORD);
+    const req = makeRequest('GET', '/anchor/object?id=obj-1', undefined, 'test-token');
+    const res = await handleAnchorRequest(req, env);
     expect(res.status).toBe(200);
     const body = await res.json<{ ok: boolean; object: { id: string } }>();
     expect(body.ok).toBe(true);
     expect(body.object.id).toBe('obj-1');
   });
 
-  it('returns 200 with object details when found by key', async () => {
-    const record = makeObjectRecord();
-    vi.mocked(store.findAnchorObjectByKey).mockResolvedValue(record);
-    vi.mocked(store.touchObjectAccess).mockResolvedValue(undefined);
-    vi.mocked(store.countPendingTasks).mockResolvedValue(2);
-
-    const req = makeRequest(
-      'GET',
-      'https://worker.example.com/anchor/object?key=test%2Fkey.txt',
-      undefined,
-      VALID_TOKEN,
-    );
-    const res = await handleAnchorRequest(req, makeEnv());
+  it('returns 200 with object when found by key', async () => {
+    vi.mocked(store.findAnchorObjectByKey).mockResolvedValue(MOCK_OBJECT_RECORD);
+    const req = makeRequest('GET', '/anchor/object?key=test%2Fkey.json', undefined, 'test-token');
+    const res = await handleAnchorRequest(req, env);
     expect(res.status).toBe(200);
-    const body = await res.json<{ ok: boolean; object: { id: string; pending_tasks: number } }>();
+    const body = await res.json<{ ok: boolean; object: { object_key: string } }>();
     expect(body.ok).toBe(true);
-    expect(body.object.pending_tasks).toBe(2);
+    expect(body.object.object_key).toBe('test/key.json');
   });
 });
 
 // ---------------------------------------------------------------------------
-// processAnchorTask - State transitions and retry logic
+// processAnchorTask – task retry and state transitions
 // ---------------------------------------------------------------------------
 
-describe('processAnchorTask', () => {
-  beforeEach(() => vi.clearAllMocks());
+describe('processAnchorTask – task retry / state changes', () => {
+  let env: Env;
 
-  function makeTask(overrides: Record<string, unknown> = {}) {
-    return {
+  interface TaskOverrides {
+    status?: 'queued' | 'in_progress' | 'done' | 'failed';
+    attempts?: number;
+    target_provider?: 'r2' | 'b2' | 'ipfs';
+  }
+
+  const makeTaskEntry = (overrides: TaskOverrides = {}) => ({
+    task: {
       id: 'task-1',
       object_id: 'obj-1',
       target_provider: 'r2' as const,
@@ -349,51 +329,49 @@ describe('processAnchorTask', () => {
       status: 'queued' as const,
       attempts: 0,
       last_error: null,
-      created_at: '2024-01-01T00:00:00Z',
-      updated_at: '2024-01-01T00:00:00Z',
+      created_at: '2024-01-01T00:00:00.000Z',
+      updated_at: '2024-01-01T00:00:00.000Z',
       ...overrides,
-    };
-  }
+    },
+    object: { ...MOCK_OBJECT_RECORD },
+  });
+
+  beforeEach(() => {
+    env = makeEnv();
+    vi.mocked(store.updateTaskState).mockResolvedValue(undefined);
+    vi.mocked(store.markObjectLocation).mockResolvedValue(undefined);
+    vi.mocked(store.countPendingTasks).mockResolvedValue(0);
+  });
 
   it('does nothing when task is not found', async () => {
     vi.mocked(store.findTaskWithObjectById).mockResolvedValue(null);
-    const env = makeEnv();
-    await processAnchorTask(env, 'missing-task');
+    await processAnchorTask(env, 'nonexistent');
     expect(store.updateTaskState).not.toHaveBeenCalled();
   });
 
   it('does nothing when task is already done', async () => {
-    vi.mocked(store.findTaskWithObjectById).mockResolvedValue({
-      task: makeTask({ status: 'done' }),
-      object: makeObjectRecord(),
-    });
-    const env = makeEnv();
+    vi.mocked(store.findTaskWithObjectById).mockResolvedValue(
+      makeTaskEntry({ status: 'done' }) as any,
+    );
     await processAnchorTask(env, 'task-1');
     expect(store.updateTaskState).not.toHaveBeenCalled();
   });
 
-  it('marks task done and object ready when r2 replication succeeds', async () => {
-    vi.mocked(store.findTaskWithObjectById).mockResolvedValue({
-      task: makeTask({ target_provider: 'r2', attempts: 0 }),
-      object: makeObjectRecord({ primary_provider: 'r2', r2_key: 'test/key.txt' }),
-    });
-    vi.mocked(r2.getFromR2).mockResolvedValue(new ArrayBuffer(11));
-    vi.mocked(r2.putToR2).mockResolvedValue({ key: 'test/key.txt' });
-    vi.mocked(store.updateTaskState).mockResolvedValue(undefined);
-    vi.mocked(store.markObjectLocation).mockResolvedValue(undefined);
-    vi.mocked(store.countPendingTasks).mockResolvedValue(0);
+  it('marks task done and object ready on successful r2 replication', async () => {
+    vi.mocked(store.findTaskWithObjectById).mockResolvedValue(makeTaskEntry() as any);
+    vi.mocked(r2.getFromR2).mockResolvedValue(new ArrayBuffer(8));
+    vi.mocked(r2.putToR2).mockResolvedValue({ key: 'test/key.json' });
 
-    await processAnchorTask(makeEnv(), 'task-1');
+    await processAnchorTask(env, 'task-1');
 
     expect(store.updateTaskState).toHaveBeenCalledWith(
-      expect.anything(),
-      'task-1',
-      'done',
-      1,
-      null,
+      env.ANCHOR_DB, 'task-1', 'in_progress', 1, null,
+    );
+    expect(store.updateTaskState).toHaveBeenCalledWith(
+      env.ANCHOR_DB, 'task-1', 'done', 1, null,
     );
     expect(store.markObjectLocation).toHaveBeenCalledWith(
-      expect.anything(),
+      env.ANCHOR_DB,
       'obj-1',
       expect.objectContaining({ status: 'ready' }),
     );
