@@ -73,6 +73,7 @@ class Menu
         add_action('admin_post_webadmin_edge_agent_run_safe_update_workflow', [$this, 'handleRunSafeUpdateWorkflow']);
         add_action('admin_post_webadmin_edge_agent_start_google_connect', [$this, 'handleStartGoogleConnect']);
         add_action('admin_post_webadmin_edge_agent_refresh_google_status', [$this, 'handleRefreshGoogleStatus']);
+        add_action('admin_post_webadmin_edge_agent_preview_google_analytics', [$this, 'handlePreviewGoogleAnalytics']);
         add_action('admin_post_webadmin_edge_agent_deploy_google_analytics', [$this, 'handleDeployGoogleAnalytics']);
         add_action('admin_post_webadmin_edge_agent_run_tab_sync', [$this, 'handleRunTabSync']);
         add_action('admin_post_webadmin_edge_agent_export_support_bundle', [$this, 'handleExportSupportBundle']);
@@ -401,15 +402,37 @@ class Menu
 
         check_admin_referer('webadmin_edge_agent_deploy_google_analytics', 'webadmin_edge_agent_google_deploy_nonce');
 
-        $response = $this->analyticsGoogle->deploy('manual');
+        $response = $this->analyticsGoogle->deploy('manual', false);
         if (!empty($response['ok'])) {
-            add_settings_error('webadmin-edge-agent', 'google-deploy-ok', 'Google GTM + GA4 deployment completed.', 'updated');
+            add_settings_error('webadmin-edge-agent', 'google-deploy-ok', 'Google GTM + GA4 deployment completed with post-deploy verification.', 'updated');
         } else {
             $message = 'Google deployment failed.';
             if (!empty($response['error'])) {
                 $message .= ' ' . sanitize_text_field((string)$response['error']);
             }
             add_settings_error('webadmin-edge-agent', 'google-deploy-error', $message, 'error');
+        }
+
+        $this->redirectWithTab('analytics');
+    }
+
+    public function handlePreviewGoogleAnalytics(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Unauthorized', 'webadmin-edge-agent'));
+        }
+
+        check_admin_referer('webadmin_edge_agent_preview_google_analytics', 'webadmin_edge_agent_google_preview_nonce');
+
+        $response = $this->analyticsGoogle->deploy('preview', true);
+        if (!empty($response['ok'])) {
+            add_settings_error('webadmin-edge-agent', 'google-preview-ok', 'Preview generated. Review planned GTM/GA4 changes before deploy.', 'updated');
+        } else {
+            $message = 'Google preview failed.';
+            if (!empty($response['error'])) {
+                $message .= ' ' . sanitize_text_field((string)$response['error']);
+            }
+            add_settings_error('webadmin-edge-agent', 'google-preview-error', $message, 'error');
         }
 
         $this->redirectWithTab('analytics');
