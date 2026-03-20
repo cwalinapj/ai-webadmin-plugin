@@ -31,15 +31,19 @@ import type {
 interface JsonResponse {
   status: number;
   body: unknown;
-  headers?: Record<string, string>;
+  headers?: Record<string, string | string[]>;
 }
 
 interface RequestContext {
   rotated_token?: string;
+  set_cookies?: string[];
 }
 
 const PUBLIC_DIR = path.resolve(process.cwd(), 'public');
 const CONSOLE_SESSION_COOKIE = 'ai_vps_console_session';
+const CONSOLE_CSRF_COOKIE = 'ai_vps_console_csrf';
+const CONSOLE_CSRF_HEADER = 'x-csrf-token';
+const rateLimitState = new Map<string, number[]>();
 
 const executor = new SafeCommandExecutor();
 
@@ -154,8 +158,134 @@ function sessionCookieValue(sessionId: string, maxAgeSeconds: number): string {
   return `${CONSOLE_SESSION_COOKIE}=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
 }
 
+function csrfCookieValue(csrfToken: string, maxAgeSeconds: number): string {
+  return `${CONSOLE_CSRF_COOKIE}=${encodeURIComponent(csrfToken)}; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
+}
+
+function sessionCookieHeaders(sessionId: string, csrfToken: string, maxAgeSeconds: number): string[] {
+  return [sessionCookieValue(sessionId, maxAgeSeconds), csrfCookieValue(csrfToken, maxAgeSeconds)];
+}
+
 function expiredSessionCookieValue(): string {
   return `${CONSOLE_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+function expiredCsrfCookieValue(): string {
+  return `${CONSOLE_CSRF_COOKIE}=; Path=/; SameSite=Lax; Max-Age=0`;
+}
+
+function randomCsrfToken(): string {
+  return randomUUID().replace(/-/g, '');
+}
+
+function sessionRotateIntervalMs(): number {
+  const parsed = Number.parseFloat(process.env.AI_VPS_SESSION_ROTATE_MINUTES ?? '30');
+  if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 24 * 60) {
+    return Math.floor(parsed * 60 * 1000);
+  }
+  return 30 * 60 * 1000;
+}
+
+function readHeaderValue(req: http.IncomingMessage, headerName: string): string {
+  const value = req.headers[headerName];
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  if (Array.isArray(value) && value.length > 0) {
+    return value[0]?.trim() ?? '';
+  }
+  return '';
+}
+
+function isMutatingMethod(method: string): boolean {
+  return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+}
+
+function isPublicMutation(pathname: string): boolean {
+  return (
+    pathname === '/api/leads' ||
+    pathname === '/api/billing/checkout-session' ||
+    pathname === '/api/stripe/webhook' ||
+    pathname === '/api/session/login'
+  );
+}
+
+function requiresSessionCsrf(method: string, pathname: string): boolean {
+  if (!isMutatingMethod(method)) {
+    return false;
+  }
+  if (!pathname.startsWith('/api/')) {
+    return false;
+  }
+  return !isPublicMutation(pathname);
+}
+
+function ipAddress(req: http.IncomingMessage): string {
+  const forwarded = readHeaderValue(req, 'x-forwarded-for');
+  if (forwarded !== '') {
+    const first = forwarded.split(',')[0]?.trim();
+    if (first) {
+      return first;
+    }
+  }
+  const remote = req.socket.remoteAddress;
+  return typeof remote === 'string' && remote.trim() !== '' ? remote.trim() : 'unknown';
+}
+
+function parsePositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function rateLimitRule(method: string, pathname: string): { scope: string; limit: number; windowMs: number } | null {
+  if (!isMutatingMethod(method) || !pathname.startsWith('/api/')) {
+    return null;
+  }
+  if (pathname === '/api/stripe/webhook') {
+    return null;
+  }
+  if (pathname === '/api/session/login') {
+    return {
+      scope: 'login',
+      limit: parsePositiveIntEnv('AI_VPS_RATE_LIMIT_LOGIN_MAX', 8),
+      windowMs: parsePositiveIntEnv('AI_VPS_RATE_LIMIT_LOGIN_WINDOW_MS', 60_000),
+    };
+  }
+  if (pathname === '/api/agent/execute' || /\/api\/actions\/[^/]+\/execute$/.test(pathname)) {
+    return {
+      scope: 'execute',
+      limit: parsePositiveIntEnv('AI_VPS_RATE_LIMIT_EXECUTE_MAX', 30),
+      windowMs: parsePositiveIntEnv('AI_VPS_RATE_LIMIT_EXECUTE_WINDOW_MS', 60_000),
+    };
+  }
+  return {
+    scope: 'mutate',
+    limit: parsePositiveIntEnv('AI_VPS_RATE_LIMIT_MUTATION_MAX', 120),
+    windowMs: parsePositiveIntEnv('AI_VPS_RATE_LIMIT_MUTATION_WINDOW_MS', 60_000),
+  };
+}
+
+function consumeRateLimit(input: { key: string; limit: number; windowMs: number }): { ok: true } | { ok: false; retryAfter: number } {
+  const now = Date.now();
+  const cutoff = now - input.windowMs;
+  const existing = rateLimitState.get(input.key) ?? [];
+  const active = existing.filter((entry) => entry > cutoff);
+  if (active.length >= input.limit) {
+    const oldest = active[0] ?? now;
+    const retryAfter = Math.max(1, Math.ceil((oldest + input.windowMs - now) / 1000));
+    rateLimitState.set(input.key, active);
+    return { ok: false, retryAfter };
+  }
+  active.push(now);
+  rateLimitState.set(input.key, active);
+  return { ok: true };
 }
 
 function sessionPrincipalFromRecord(session: { id: string; role: Role; tenant_id: string; email: string }): ApiPrincipal {
@@ -170,7 +300,7 @@ function sessionPrincipalFromRecord(session: { id: string; role: Role; tenant_id
   };
 }
 
-function json(status: number, body: unknown, headers?: Record<string, string>): JsonResponse {
+function json(status: number, body: unknown, headers?: Record<string, string | string[]>): JsonResponse {
   return { status, body, headers };
 }
 
@@ -236,15 +366,31 @@ async function authorize(
   role: Role,
   context: RequestContext,
 ): Promise<ApiPrincipal | null> {
+  const cookies = parseCookies(req);
   let principal = await authenticate(req, store);
   if (!principal) {
-    const sessionId = parseCookies(req).get(CONSOLE_SESSION_COOKIE) ?? '';
+    const sessionId = cookies.get(CONSOLE_SESSION_COOKIE) ?? '';
     if (sessionId !== '') {
       const session = store.getConsoleSession(sessionId);
       const now = Date.now();
       if (session && !session.revoked_at && Date.parse(session.expires_at) > now) {
-        store.touchConsoleSession(session.id);
-        principal = sessionPrincipalFromRecord(session);
+        const touched = store.touchConsoleSession(session.id) ?? session;
+        let nextSession = touched;
+        const rotateInterval = sessionRotateIntervalMs();
+        const lastUsedMs = Date.parse(session.last_used_at ?? session.created_at);
+        if (rotateInterval === 0 || (Number.isFinite(lastUsedMs) && now - lastUsedMs >= rotateInterval)) {
+          const rotated = store.rotateConsoleSession({
+            id: session.id,
+            expires_at: new Date(now + sessionDurationMs()).toISOString(),
+          });
+          if (rotated) {
+            nextSession = rotated;
+            const maxAgeSeconds = Math.max(60, Math.floor((Date.parse(rotated.expires_at) - now) / 1000));
+            const csrfToken = randomCsrfToken();
+            context.set_cookies = sessionCookieHeaders(rotated.id, csrfToken, maxAgeSeconds);
+          }
+        }
+        principal = sessionPrincipalFromRecord(nextSession);
       }
     }
   }
@@ -933,6 +1079,32 @@ async function route(
   const method = req.method ?? 'GET';
   const url = new URL(req.url ?? '/', 'http://localhost');
   const pathname = url.pathname;
+  const cookies = parseCookies(req);
+
+  const rule = rateLimitRule(method, pathname);
+  if (rule) {
+    const key = `${rule.scope}:${ipAddress(req)}`;
+    const limited = consumeRateLimit({
+      key,
+      limit: rule.limit,
+      windowMs: rule.windowMs,
+    });
+    if (!limited.ok) {
+      return json(
+        429,
+        { ok: false, error: 'rate_limit_exceeded', scope: rule.scope, retry_after_seconds: limited.retryAfter },
+        { 'retry-after': String(limited.retryAfter) },
+      );
+    }
+  }
+
+  if (requiresSessionCsrf(method, pathname) && cookies.get(CONSOLE_SESSION_COOKIE)) {
+    const cookieToken = cookies.get(CONSOLE_CSRF_COOKIE) ?? '';
+    const headerToken = readHeaderValue(req, CONSOLE_CSRF_HEADER);
+    if (cookieToken === '' || headerToken === '' || !secureCompare(cookieToken, headerToken)) {
+      return json(403, { ok: false, error: 'csrf_invalid' });
+    }
+  }
 
   if (method === 'GET' && pathname === '/health') {
     return json(200, {
@@ -1480,6 +1652,10 @@ async function route(
     ) {
       return json(401, { ok: false, error: 'invalid_credentials' });
     }
+    store.revokeConsoleSessionsByEmail({
+      email: credentials.email,
+      tenant_id: credentials.tenant_id,
+    });
     const expiresAt = new Date(Date.now() + sessionDurationMs()).toISOString();
     const session = store.createConsoleSession({
       email: credentials.email,
@@ -1488,6 +1664,7 @@ async function route(
       expires_at: expiresAt,
     });
     const maxAgeSeconds = Math.max(60, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000));
+    const csrfToken = randomCsrfToken();
     store.addAuditLog({
       tenant_id: session.tenant_id,
       site_id: null,
@@ -1508,7 +1685,7 @@ async function route(
           expires_at: session.expires_at,
         },
       },
-      { 'set-cookie': sessionCookieValue(session.id, maxAgeSeconds) },
+      { 'set-cookie': sessionCookieHeaders(session.id, csrfToken, maxAgeSeconds) },
     );
   }
 
@@ -1528,7 +1705,7 @@ async function route(
         });
       }
     }
-    return json(200, { ok: true }, { 'set-cookie': expiredSessionCookieValue() });
+    return json(200, { ok: true }, { 'set-cookie': [expiredSessionCookieValue(), expiredCsrfCookieValue()] });
   }
 
   if (method === 'GET' && pathname === '/api/session/me') {
@@ -2759,6 +2936,14 @@ export function createServer(): http.Server {
         response.headers = {
           ...(response.headers ?? {}),
           'x-rotated-api-key': context.rotated_token,
+        };
+      }
+      if (context.set_cookies && context.set_cookies.length > 0) {
+        const existing = response.headers?.['set-cookie'];
+        const existingValues = Array.isArray(existing) ? existing : existing ? [existing] : [];
+        response.headers = {
+          ...(response.headers ?? {}),
+          'set-cookie': [...existingValues, ...context.set_cookies],
         };
       }
       send(res, response);

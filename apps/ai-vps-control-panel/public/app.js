@@ -69,6 +69,7 @@ const closePayloadDialogBtn = document.querySelector("#closePayloadDialogBtn");
 const payloadDialogBody = document.querySelector("#payloadDialogBody");
 
 const TOKEN_KEY = "ai_vps_api_token";
+const CSRF_COOKIE_KEY = "ai_vps_console_csrf";
 let latestWebhookEvents = [];
 
 function getToken() {
@@ -79,14 +80,34 @@ function setToken(token) {
   window.localStorage.setItem(TOKEN_KEY, token);
 }
 
+function getCookie(name) {
+  const items = document.cookie ? document.cookie.split(";") : [];
+  const prefix = `${name}=`;
+  for (const item of items) {
+    const trimmed = item.trim();
+    if (trimmed.startsWith(prefix)) {
+      return decodeURIComponent(trimmed.slice(prefix.length));
+    }
+  }
+  return "";
+}
+
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   const token = getToken();
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
+  const method = (options.method || "GET").toUpperCase();
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    const csrfToken = getCookie(CSRF_COOKIE_KEY);
+    if (csrfToken) {
+      headers.set("x-csrf-token", csrfToken);
+    }
+  }
   const response = await fetch(path, {
     ...options,
+    method,
     headers,
     credentials: "same-origin",
   });

@@ -20,6 +20,7 @@ beforeAll(async () => {
   process.env.AI_VPS_DB_PATH = ':memory:';
   process.env.AI_VPS_CONSOLE_EMAIL = 'owner@loccount.local';
   process.env.AI_VPS_CONSOLE_PASSWORD = 'console-pass-123';
+  process.env.AI_VPS_SESSION_ROTATE_MINUTES = '0';
   tempScriptDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-vps-panel-tests-'));
   const securityScanScriptPath = path.join(tempScriptDir, 'run-security-scan.sh');
   snapshotScriptPath = path.join(tempScriptDir, 'snapshot-site.sh');
@@ -189,13 +190,19 @@ describe('ai vps control panel api', () => {
       }),
     });
     expect(loginRes.status).toBe(200);
-    const cookie = loginRes.headers.get('set-cookie');
-    expect(typeof cookie).toBe('string');
-    expect((cookie ?? '').includes('ai_vps_console_session=')).toBe(true);
+    const setCookie = loginRes.headers.get('set-cookie');
+    expect(typeof setCookie).toBe('string');
+    const sessionCookie = extractCookieValue(setCookie ?? '', 'ai_vps_console_session');
+    const csrfCookie = extractCookieValue(setCookie ?? '', 'ai_vps_console_csrf');
+    expect(sessionCookie).not.toBe('');
+    expect(csrfCookie).not.toBe('');
 
     const leadsRes = await fetch(`${baseUrl}/api/leads`, {
       headers: {
-        cookie: cookie ?? '',
+        cookie: cookieHeader({
+          ai_vps_console_session: sessionCookie,
+          ai_vps_console_csrf: csrfCookie,
+        }),
       },
     });
     const leadsBody = (await leadsRes.json()) as {
@@ -207,6 +214,135 @@ describe('ai vps control panel api', () => {
     expect(leadsBody.leads.some((item) => item.email === 'taylor@example.com' && item.plan_code === 'growth')).toBe(
       true,
     );
+  });
+
+  it('enforces CSRF header for session-auth protected mutations and rotates session cookie', async () => {
+    const loginRes = await fetch(`${baseUrl}/api/session/login`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: 'owner@loccount.local',
+        password: 'console-pass-123',
+      }),
+    });
+    expect(loginRes.status).toBe(200);
+    const loginSetCookie = loginRes.headers.get('set-cookie') ?? '';
+    const sessionCookie = extractCookieValue(loginSetCookie, 'ai_vps_console_session');
+    const csrfCookie = extractCookieValue(loginSetCookie, 'ai_vps_console_csrf');
+    const cookie = cookieHeader({
+      ai_vps_console_session: sessionCookie,
+      ai_vps_console_csrf: csrfCookie,
+    });
+
+    const createSiteRes = await fetch(`${baseUrl}/api/sites`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'csrf-guard-site',
+        tenant_id: 'tenant-a',
+        domain: 'csrf-guard.example.com',
+        panel_type: 'ai_vps_panel',
+        runtime_type: 'php_generic',
+      }),
+    });
+    expect(createSiteRes.status).toBe(201);
+
+    const blockedMutationRes = await fetch(`${baseUrl}/api/billing/subscriptions`, {
+      method: 'POST',
+      headers: {
+        cookie,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        site_id: 'csrf-guard-site',
+        status: 'active',
+        sandbox_enabled: true,
+        plan_code: 'growth',
+      }),
+    });
+    const blockedBody = (await blockedMutationRes.json()) as { ok: boolean; error: string };
+    expect(blockedMutationRes.status).toBe(403);
+    expect(blockedBody.error).toBe('csrf_invalid');
+
+    const allowedMutationRes = await fetch(`${baseUrl}/api/billing/subscriptions`, {
+      method: 'POST',
+      headers: {
+        cookie,
+        'content-type': 'application/json',
+        'x-csrf-token': csrfCookie,
+      },
+      body: JSON.stringify({
+        site_id: 'csrf-guard-site',
+        status: 'active',
+        sandbox_enabled: true,
+        plan_code: 'growth',
+      }),
+    });
+    expect(allowedMutationRes.status).toBe(201);
+    const allowedSetCookie = allowedMutationRes.headers.get('set-cookie') ?? '';
+    const sessionCookieAfterMutation =
+      extractCookieValue(allowedSetCookie, 'ai_vps_console_session') || sessionCookie;
+    const csrfCookieAfterMutation = extractCookieValue(allowedSetCookie, 'ai_vps_console_csrf') || csrfCookie;
+
+    const meRes = await fetch(`${baseUrl}/api/session/me`, {
+      headers: {
+        cookie: cookieHeader({
+          ai_vps_console_session: sessionCookieAfterMutation,
+          ai_vps_console_csrf: csrfCookieAfterMutation,
+        }),
+      },
+    });
+    expect(meRes.status).toBe(200);
+    const rotatedSetCookie = meRes.headers.get('set-cookie') ?? '';
+    const rotatedSessionCookie = extractCookieValue(rotatedSetCookie, 'ai_vps_console_session');
+    expect(rotatedSessionCookie).not.toBe('');
+    expect(rotatedSessionCookie).not.toBe(sessionCookie);
+  });
+
+  it('rate limits repeated login attempts', async () => {
+    const previousLimit = process.env.AI_VPS_RATE_LIMIT_LOGIN_MAX;
+    const previousWindow = process.env.AI_VPS_RATE_LIMIT_LOGIN_WINDOW_MS;
+    process.env.AI_VPS_RATE_LIMIT_LOGIN_MAX = '2';
+    process.env.AI_VPS_RATE_LIMIT_LOGIN_WINDOW_MS = '60000';
+    try {
+      const attempts: Array<{ status: number; body: { ok?: boolean; error?: string }; retryAfter: string | null }> = [];
+      for (let i = 0; i < 3; i += 1) {
+        const response = await fetch(`${baseUrl}/api/session/login`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            email: 'owner@loccount.local',
+            password: 'bad-password',
+          }),
+        });
+        attempts.push({
+          status: response.status,
+          body: (await response.json()) as { ok?: boolean; error?: string },
+          retryAfter: response.headers.get('retry-after'),
+        });
+      }
+
+      const limited = attempts.find((item) => item.status === 429);
+      expect(limited).toBeDefined();
+      expect(limited?.body.error).toBe('rate_limit_exceeded');
+      expect(limited?.retryAfter).not.toBeNull();
+    } finally {
+      if (previousLimit === undefined) {
+        delete process.env.AI_VPS_RATE_LIMIT_LOGIN_MAX;
+      } else {
+        process.env.AI_VPS_RATE_LIMIT_LOGIN_MAX = previousLimit;
+      }
+      if (previousWindow === undefined) {
+        delete process.env.AI_VPS_RATE_LIMIT_LOGIN_WINDOW_MS;
+      } else {
+        process.env.AI_VPS_RATE_LIMIT_LOGIN_WINDOW_MS = previousWindow;
+      }
+    }
   });
 
   it('requires auth for protected routes', async () => {
@@ -1586,6 +1722,22 @@ function authHeaders(token: string): Record<string, string> {
   return {
     authorization: `Bearer ${token}`,
   };
+}
+
+function extractCookieValue(setCookieHeader: string, cookieName: string): string {
+  const pattern = new RegExp(`${cookieName}=([^;,]+)`);
+  const match = setCookieHeader.match(pattern);
+  if (!match || typeof match[1] !== 'string') {
+    return '';
+  }
+  return decodeURIComponent(match[1]);
+}
+
+function cookieHeader(values: Record<string, string>): string {
+  return Object.entries(values)
+    .filter(([, value]) => value !== '')
+    .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+    .join('; ');
 }
 
 function stripeWebhookHeaders(payload: string, secret: string): Record<string, string> {

@@ -1151,6 +1151,34 @@ export class SqliteStore {
     return this.getConsoleSession(id);
   }
 
+  revokeConsoleSessionsByEmail(input: { email: string; tenant_id: string }): number {
+    const now = new Date().toISOString();
+    if (input.tenant_id === '*') {
+      const result = this.db
+        .prepare(`UPDATE console_sessions SET revoked_at = ? WHERE email = ? AND revoked_at IS NULL`)
+        .run(now, input.email);
+      return Number(result.changes ?? 0);
+    }
+    const result = this.db
+      .prepare(`UPDATE console_sessions SET revoked_at = ? WHERE email = ? AND tenant_id = ? AND revoked_at IS NULL`)
+      .run(now, input.email, input.tenant_id);
+    return Number(result.changes ?? 0);
+  }
+
+  rotateConsoleSession(input: { id: string; expires_at: string }): ConsoleSessionRecord | null {
+    const current = this.getConsoleSession(input.id);
+    if (!current || current.revoked_at) {
+      return null;
+    }
+    this.revokeConsoleSession(current.id);
+    return this.createConsoleSession({
+      email: current.email,
+      role: current.role,
+      tenant_id: current.tenant_id,
+      expires_at: input.expires_at,
+    });
+  }
+
   createLeadCapture(input: {
     name: string;
     email: string;
