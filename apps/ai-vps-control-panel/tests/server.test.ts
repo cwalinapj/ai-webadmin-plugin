@@ -9,6 +9,7 @@ let server: ReturnType<typeof createServer>;
 let baseUrl = '';
 let tempScriptDir = '';
 let snapshotScriptPath = '';
+let rotateSecretsScriptPath = '';
 
 beforeAll(async () => {
   process.env.AI_VPS_API_KEYS = [
@@ -22,6 +23,7 @@ beforeAll(async () => {
   tempScriptDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-vps-panel-tests-'));
   const securityScanScriptPath = path.join(tempScriptDir, 'run-security-scan.sh');
   snapshotScriptPath = path.join(tempScriptDir, 'snapshot-site.sh');
+  rotateSecretsScriptPath = path.join(tempScriptDir, 'rotate-secrets.sh');
   await fs.writeFile(
     securityScanScriptPath,
     '#!/usr/bin/env bash\nset -euo pipefail\nprintf \'{"ok":true,"scan":"completed","args":"%s"}\\n\' \"$*\"\n',
@@ -32,10 +34,17 @@ beforeAll(async () => {
     '#!/usr/bin/env bash\nset -euo pipefail\nprintf \'{"ok":true,"snapshot":"completed","args":"%s"}\\n\' \"$*\"\n',
     'utf8',
   );
+  await fs.writeFile(
+    rotateSecretsScriptPath,
+    '#!/usr/bin/env bash\nset -euo pipefail\nprintf \'{"ok":true,"secret":"tok_SUPERSECRET12345","name":"API_TOKEN"}\\n\'\n',
+    'utf8',
+  );
   await fs.chmod(securityScanScriptPath, 0o755);
   await fs.chmod(snapshotScriptPath, 0o755);
+  await fs.chmod(rotateSecretsScriptPath, 0o755);
   process.env.AI_VPS_RUN_SECURITY_SCAN_SCRIPT_PATH = securityScanScriptPath;
   process.env.AI_VPS_SNAPSHOT_SCRIPT_PATH = snapshotScriptPath;
+  process.env.AI_VPS_ROTATE_SECRETS_SCRIPT_PATH = rotateSecretsScriptPath;
   server = createServer();
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve());
@@ -1321,6 +1330,60 @@ describe('ai vps control panel api', () => {
     expect(executeBody.stdout).toContain('"scan":"completed"');
     expect(executeBody.worker_sync?.ok).toBe(true);
     expect(executeBody.worker_sync?.details?.skipped).toBe(true);
+  });
+
+  it('redacts sensitive execution stdout/stderr for live actions', async () => {
+    const createSiteRes = await fetch(`${baseUrl}/api/sites`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'redact-site-1',
+        tenant_id: 'tenant-a',
+        domain: 'redact.example.com',
+        panel_type: 'ai_vps_panel',
+        runtime_type: 'php_generic',
+      }),
+    });
+    expect(createSiteRes.status).toBe(201);
+
+    const executeRes = await fetch(`${baseUrl}/api/agent/execute`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        site_id: 'redact-site-1',
+        dry_run: false,
+        confirmed: true,
+        action: {
+          id: 'rotate-action-1',
+          type: 'rotate_secret',
+          description: 'rotate secret for redaction test',
+          risk: 'high',
+          requires_confirmation: true,
+          args: {
+            name: 'API_TOKEN',
+            write_env_file: '/tmp/redact-runtime.env',
+            prefix: 'tok_',
+            length: 40,
+          },
+        },
+      }),
+    });
+    const executeBody = (await executeRes.json()) as {
+      ok: boolean;
+      stdout?: string;
+      command?: { bin: string };
+    };
+    expect(executeRes.status).toBe(200);
+    expect(executeBody.ok).toBe(true);
+    expect(executeBody.command?.bin).toBe(rotateSecretsScriptPath);
+    expect(executeBody.stdout).toContain('"secret":"[REDACTED]"');
+    expect(executeBody.stdout).not.toContain('tok_SUPERSECRET12345');
   });
 
   it('manages monthly sandbox licensing state and exposes blocked access when unpaid', async () => {

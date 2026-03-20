@@ -13,6 +13,7 @@ Initial backend scaffold for a custom VPS control panel operated through a chat-
 - Safe command executor with allowlisted services and confirmation gating.
 - Dry-run-first execution mode for risky operations.
 - Manual queue endpoint with policy guardrails and idempotency-key dedupe.
+- Sensitive values in execution `stdout/stderr` are redacted before API response and persistence.
 - Persistent API-key/PAT management with hashed-at-rest secrets, audit trails, revoke/rotate endpoints, and auto-rotation support.
 - Supports `switch_load_balancer_mode` action mapped to `/root/watchdog-heartbeat.sh` with strict args validation.
 - Supports `run_site_snapshot` action mapped to `/root/snapshot-site.sh` or `AI_VPS_SNAPSHOT_SCRIPT_PATH`.

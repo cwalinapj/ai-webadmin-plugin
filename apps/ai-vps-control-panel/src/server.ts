@@ -211,6 +211,36 @@ function queuedToAgentAction(action: QueuedActionRecord): AgentAction {
   };
 }
 
+function redactSensitiveText(value: string): string {
+  if (value.trim() === '') {
+    return value;
+  }
+  let redacted = value;
+  const patterns: Array<[RegExp, string]> = [
+    [/"secret"\s*:\s*"[^"]+"/gi, '"secret":"[REDACTED]"'],
+    [/(Bearer\s+)[A-Za-z0-9._\-+/=]+/gi, '$1[REDACTED]'],
+    [/\b(sk_(live|test)_[A-Za-z0-9]+)\b/g, '[REDACTED]'],
+    [/\b(tk_[A-Za-z0-9]+)\b/g, '[REDACTED]'],
+    [/\b(tok_[A-Za-z0-9]+)\b/g, '[REDACTED]'],
+    [/\b(password|passwd|api[_-]?key|token|secret)\s*[:=]\s*[^\s"']+/gi, '$1=[REDACTED]'],
+  ];
+  for (const [pattern, replacement] of patterns) {
+    redacted = redacted.replace(pattern, replacement);
+  }
+  return redacted;
+}
+
+function sanitizeExecuteResult<T extends { stdout?: string; stderr?: string }>(result: T): T {
+  const copy = { ...result };
+  if (typeof copy.stdout === 'string') {
+    copy.stdout = redactSensitiveText(copy.stdout);
+  }
+  if (typeof copy.stderr === 'string') {
+    copy.stderr = redactSensitiveText(copy.stderr);
+  }
+  return copy;
+}
+
 function contentTypeForFile(filePath: string): string {
   if (filePath.endsWith('.js')) {
     return 'application/javascript; charset=utf-8';
@@ -2478,10 +2508,11 @@ async function route(
       const dryRun = typeof body.dry_run === 'boolean' ? body.dry_run : true;
       const confirmed = typeof body.confirmed === 'boolean' ? body.confirmed : false;
 
-      const execute = await executor.execute(queuedToAgentAction(action), {
+      const executeRaw = await executor.execute(queuedToAgentAction(action), {
         dryRun,
         confirmed,
       });
+      const execute = sanitizeExecuteResult(executeRaw);
 
       const site = store.getSite(action.site_id);
       if (!site) {
@@ -2551,10 +2582,11 @@ async function route(
       return json(403, { ok: false, error: 'tenant_scope_violation' });
     }
 
-    const result = await executor.execute(request.action, {
+    const resultRaw = await executor.execute(request.action, {
       dryRun: request.dry_run,
       confirmed: request.confirmed,
     });
+    const result = sanitizeExecuteResult(resultRaw);
 
     if (result.ok) {
       const workerSync = await syncWorkerAfterAction({
