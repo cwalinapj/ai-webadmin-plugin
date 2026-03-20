@@ -226,4 +226,35 @@ describe('safe command executor', () => {
     expect(result.command?.args).toContain('--snapshot-path');
     expect(result.command?.args).toContain('/var/backups/example-snap.tgz');
   });
+
+  it('blocks live execution when non-root guardrail is enabled and process uid is root', async () => {
+    const original = process.env.AI_VPS_REQUIRE_NON_ROOT_EXEC;
+    process.env.AI_VPS_REQUIRE_NON_ROOT_EXEC = 'true';
+    const execFn = vi.fn(async () => ({ stdout: '', stderr: '', code: 0 }));
+    const executor = new SafeCommandExecutor(execFn);
+    const getuidSpy =
+      typeof process.getuid === 'function'
+        ? vi.spyOn(process as typeof process & { getuid: () => number }, 'getuid').mockReturnValue(0)
+        : null;
+    const action: AgentAction = {
+      id: 'a11',
+      type: 'check_service_status',
+      description: 'status',
+      risk: 'low',
+      requires_confirmation: false,
+      args: { service: 'nginx' },
+    };
+
+    const result = await executor.execute(action, { dryRun: false, confirmed: true });
+    expect(result.ok).toBe(false);
+    expect(result.blocked_reason).toBe('runtime_guardrail_non_root_required');
+    expect(execFn).toHaveBeenCalledTimes(0);
+
+    getuidSpy?.mockRestore();
+    if (typeof original === 'string') {
+      process.env.AI_VPS_REQUIRE_NON_ROOT_EXEC = original;
+    } else {
+      delete process.env.AI_VPS_REQUIRE_NON_ROOT_EXEC;
+    }
+  });
 });

@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -41,6 +42,65 @@ const PUBLIC_DIR = path.resolve(process.cwd(), 'public');
 const CONSOLE_SESSION_COOKIE = 'ai_vps_console_session';
 
 const executor = new SafeCommandExecutor();
+
+interface ScriptContractIssue {
+  script: string;
+  path: string;
+  issue: string;
+}
+
+function hostScriptPathSpecs(): Array<{ script: string; env: string; fallback: string }> {
+  return [
+    { script: 'watchdog-heartbeat', env: 'AI_VPS_WATCHDOG_SCRIPT_PATH', fallback: '/root/watchdog-heartbeat.sh' },
+    { script: 'snapshot-site', env: 'AI_VPS_SNAPSHOT_SCRIPT_PATH', fallback: '/root/snapshot-site.sh' },
+    { script: 'plan-upgrade', env: 'AI_VPS_PLAN_UPGRADE_SCRIPT_PATH', fallback: '/root/plan-upgrade.sh' },
+    { script: 'verify-upgrade', env: 'AI_VPS_VERIFY_UPGRADE_SCRIPT_PATH', fallback: '/root/verify-upgrade.sh' },
+    { script: 'rollback-upgrade', env: 'AI_VPS_ROLLBACK_UPGRADE_SCRIPT_PATH', fallback: '/root/rollback-upgrade.sh' },
+    { script: 'run-security-scan', env: 'AI_VPS_RUN_SECURITY_SCAN_SCRIPT_PATH', fallback: '/root/run-security-scan.sh' },
+    { script: 'rotate-secrets', env: 'AI_VPS_ROTATE_SECRETS_SCRIPT_PATH', fallback: '/root/rotate-secrets.sh' },
+  ];
+}
+
+function resolvedScriptPath(envName: string, fallback: string): string {
+  const raw = process.env[envName];
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    return raw.trim();
+  }
+  return fallback;
+}
+
+function evaluateScriptContract(): { issues: ScriptContractIssue[]; strict: boolean } {
+  const strict = process.env.AI_VPS_STRICT_SCRIPT_CHECKS === 'true';
+  const issues: ScriptContractIssue[] = [];
+
+  for (const spec of hostScriptPathSpecs()) {
+    const scriptPath = resolvedScriptPath(spec.env, spec.fallback);
+    if (!fsSync.existsSync(scriptPath)) {
+      issues.push({ script: spec.script, path: scriptPath, issue: 'missing' });
+      continue;
+    }
+    try {
+      fsSync.accessSync(scriptPath, fsSync.constants.X_OK);
+    } catch {
+      issues.push({ script: spec.script, path: scriptPath, issue: 'not_executable' });
+      continue;
+    }
+    try {
+      const stat = fsSync.statSync(scriptPath);
+      if (!stat.isFile()) {
+        issues.push({ script: spec.script, path: scriptPath, issue: 'not_regular_file' });
+        continue;
+      }
+      if ((stat.mode & 0o002) !== 0) {
+        issues.push({ script: spec.script, path: scriptPath, issue: 'world_writable' });
+      }
+    } catch {
+      issues.push({ script: spec.script, path: scriptPath, issue: 'stat_failed' });
+    }
+  }
+
+  return { issues, strict };
+}
 
 function sessionDurationMs(): number {
   const parsed = Number.parseInt(process.env.AI_VPS_CONSOLE_SESSION_HOURS ?? '168', 10);
@@ -840,13 +900,22 @@ async function route(
   req: http.IncomingMessage,
   store: ReturnType<typeof createStore>,
   context: RequestContext,
+  scriptContract: { issues: ScriptContractIssue[]; strict: boolean },
 ): Promise<JsonResponse> {
   const method = req.method ?? 'GET';
   const url = new URL(req.url ?? '/', 'http://localhost');
   const pathname = url.pathname;
 
   if (method === 'GET' && pathname === '/health') {
-    return json(200, { ok: true, service: 'ai-vps-control-panel' });
+    return json(200, {
+      ok: true,
+      service: 'ai-vps-control-panel',
+      script_contract: {
+        strict: scriptContract.strict,
+        issues_count: scriptContract.issues.length,
+        issues: scriptContract.issues,
+      },
+    });
   }
 
   if (method === 'GET' && pathname === '/api/pricing/plans') {
@@ -2618,6 +2687,16 @@ async function route(
 
 export function createServer(): http.Server {
   const store = createStore();
+  const scriptContract = evaluateScriptContract();
+  if (scriptContract.strict && scriptContract.issues.length > 0) {
+    const summary = scriptContract.issues.map((item) => `${item.script}:${item.issue}`).join(', ');
+    throw new Error(`script_contract_violation:${summary}`);
+  }
+  for (const issue of scriptContract.issues) {
+    process.stderr.write(
+      `[ai-vps-control-panel] script-contract warning script=${issue.script} issue=${issue.issue} path=${issue.path}\n`,
+    );
+  }
   const server = http.createServer(async (req, res) => {
     try {
       const method = req.method ?? 'GET';
@@ -2631,7 +2710,7 @@ export function createServer(): http.Server {
       }
 
       const context: RequestContext = {};
-      const response = await route(req, store, context);
+      const response = await route(req, store, context, scriptContract);
       if (context.rotated_token) {
         response.headers = {
           ...(response.headers ?? {}),

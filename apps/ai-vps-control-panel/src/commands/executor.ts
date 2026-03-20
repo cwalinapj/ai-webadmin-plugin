@@ -25,25 +25,52 @@ function pathStartsWithAllowedPrefix(value: string, prefixes: string[]): boolean
   });
 }
 
+function constrainedExecEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  const passthrough = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ'];
+  for (const key of passthrough) {
+    const value = process.env[key];
+    if (typeof value === 'string' && value !== '') {
+      env[key] = value;
+    }
+  }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith('AI_VPS_') && typeof value === 'string') {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
 async function defaultExec(bin: string, args: string[], timeoutMs: number): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve) => {
-    execFile(bin, args, { timeout: timeoutMs }, (error, stdout, stderr) => {
-      if (error) {
-        const code = typeof error.code === 'number' ? error.code : 1;
+    execFile(
+      bin,
+      args,
+      {
+        timeout: timeoutMs,
+        cwd: '/',
+        env: constrainedExecEnv(),
+        maxBuffer: Number.parseInt(process.env.AI_VPS_EXEC_MAX_BUFFER_BYTES ?? '1048576', 10) || 1048576,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const code = typeof error.code === 'number' ? error.code : 1;
+          resolve({
+            stdout: stdout ?? '',
+            stderr: stderr || error.message,
+            code,
+          });
+          return;
+        }
+
         resolve({
           stdout: stdout ?? '',
-          stderr: stderr || error.message,
-          code,
+          stderr: stderr ?? '',
+          code: 0,
         });
-        return;
-      }
-
-      resolve({
-        stdout: stdout ?? '',
-        stderr: stderr ?? '',
-        code: 0,
-      });
-    });
+      },
+    );
   });
 }
 
@@ -87,6 +114,18 @@ export class SafeCommandExecutor {
         dry_run: true,
         command: command.value,
       };
+    }
+
+    if (process.env.AI_VPS_REQUIRE_NON_ROOT_EXEC === 'true') {
+      const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+      if (uid === 0) {
+        return {
+          ok: false,
+          dry_run: false,
+          blocked_reason: 'runtime_guardrail_non_root_required',
+          command: command.value,
+        };
+      }
     }
 
     const result = await this.execFn(command.value.bin, command.value.args, this.timeoutMs);

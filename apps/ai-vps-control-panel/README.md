@@ -14,6 +14,8 @@ Initial backend scaffold for a custom VPS control panel operated through a chat-
 - Dry-run-first execution mode for risky operations.
 - Manual queue endpoint with policy guardrails and idempotency-key dedupe.
 - Sensitive values in execution `stdout/stderr` are redacted before API response and persistence.
+- Startup script contract checks are exposed in `/health` and can be enforced with `AI_VPS_STRICT_SCRIPT_CHECKS=true`.
+- Executor runs commands with constrained env/cwd and supports non-root-only enforcement via `AI_VPS_REQUIRE_NON_ROOT_EXEC=true`.
 - Persistent API-key/PAT management with hashed-at-rest secrets, audit trails, revoke/rotate endpoints, and auto-rotation support.
 - Supports `switch_load_balancer_mode` action mapped to `/root/watchdog-heartbeat.sh` with strict args validation.
 - Supports `run_site_snapshot` action mapped to `/root/snapshot-site.sh` or `AI_VPS_SNAPSHOT_SCRIPT_PATH`.
@@ -113,6 +115,8 @@ export AI_VPS_API_KEYS="admin-a:admin:tenant-a,operator-a:operator:tenant-a"
 export AI_VPS_SECRET_BACKEND="local"
 export AI_VPS_TOKEN_PEPPER="change-this-in-prod"
 export AI_VPS_TOKEN_ROTATE_DAYS="30"
+export AI_VPS_STRICT_SCRIPT_CHECKS="true"
+export AI_VPS_REQUIRE_NON_ROOT_EXEC="true"
 npm test
 npm run build
 npm start
