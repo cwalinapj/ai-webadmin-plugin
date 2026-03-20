@@ -32,6 +32,7 @@ Build a VPS-native control panel where operators manage infrastructure through a
 - API routes for sites, chat planning, and action execution.
 - API-key auth with tenant-scoped RBAC (`viewer`/`operator`/`admin`).
 - Persistent API key + PAT store (SQLite) with hash-at-rest secrets, revoke/rotate flows, auto-rotation hooks, and token audit events.
+- Pluggable secret backend for token hashing: local peppered SHA-256 or HashiCorp Vault Transit HMAC.
 - Worker sync hook that publishes signed telemetry/jobs through `panel-addon-core`.
 - SQLite persistence for:
   - sites

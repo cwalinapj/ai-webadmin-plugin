@@ -3,7 +3,7 @@ import { authenticate, isAllowed } from '../src/auth/apiKeys.js';
 import type { ApiPrincipal } from '../src/types.js';
 
 describe('api key auth', () => {
-  it('authenticates bearer token from configured key map', () => {
+  it('authenticates bearer token from configured key map', async () => {
     process.env.AI_VPS_API_KEYS = 'token-a:operator:tenant-a,token-b:viewer:tenant-b';
     const request = {
       headers: {
@@ -11,7 +11,7 @@ describe('api key auth', () => {
       },
     } as unknown as Parameters<typeof authenticate>[0];
 
-    const principal = authenticate(request);
+    const principal = await authenticate(request);
     expect(principal).not.toBeNull();
     expect(principal?.type).toBe('env');
     expect(principal?.role).toBe('operator');

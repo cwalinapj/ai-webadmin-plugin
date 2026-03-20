@@ -45,7 +45,7 @@ export interface SiteRecord {
 }
 
 export interface ApiPrincipal {
-  type: 'env' | 'db';
+  type: 'env' | 'db' | 'session';
   token_id: string | null;
   token_type: TokenType | null;
   token: string;
@@ -146,4 +146,97 @@ export interface AuthTokenRecord {
   rotated_from: string | null;
   revoked_at: string | null;
   revoked_reason: string | null;
+}
+
+export interface PolicyTemplateRecord {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string;
+  category: string;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SitePolicyBindingRecord {
+  id: string;
+  tenant_id: string;
+  site_id: string;
+  template_id: string;
+  template_name: string;
+  status: string;
+  applied_by: string;
+  applied_at: string;
+  notes: string | null;
+}
+
+export type BillingStatus = 'active' | 'trialing' | 'past_due' | 'canceled' | 'unpaid';
+
+export interface BillingSubscriptionRecord {
+  site_id: string;
+  tenant_id: string;
+  plugin_id: string;
+  plan_code: string;
+  status: BillingStatus;
+  sandbox_enabled: boolean;
+  current_period_end: string | null;
+  grace_period_end: string | null;
+  updated_by: string;
+  updated_at: string;
+}
+
+export interface ConsoleSessionRecord {
+  id: string;
+  email: string;
+  role: Role;
+  tenant_id: string;
+  created_at: string;
+  expires_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface LeadCaptureRecord {
+  id: string;
+  name: string;
+  email: string;
+  company: string | null;
+  source: string;
+  product_slug: string | null;
+  plan_code: string | null;
+  message: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StripeCheckoutOrderRecord {
+  id: string;
+  tenant_id: string;
+  site_id: string | null;
+  lead_id: string | null;
+  product_slug: string | null;
+  plan_code: string;
+  stripe_checkout_session_id: string | null;
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  status: string;
+  checkout_url: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface StripeWebhookEventRecord {
+  id: string;
+  stripe_event_id: string;
+  event_type: string;
+  livemode: boolean;
+  status: 'processed' | 'failed';
+  tenant_id: string | null;
+  site_id: string | null;
+  payload: Record<string, unknown>;
+  error_message: string | null;
+  processed_at: string;
 }

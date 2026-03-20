@@ -3,77 +3,117 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI VPS Control Panel</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <title>LocCount AI Growth Stack</title>
+    <meta
+      name="description"
+      content="AI growth and infrastructure products for paid traffic, SEO, web administration, hosting, DNS, and VPS control."
+    />
+    <link rel="stylesheet" href="/marketing.css" />
   </head>
-  <body>
-    <header class="topbar">
-      <h1>AI VPS Control Panel</h1>
-      <div class="auth">
-        <input id="tokenInput" type="password" placeholder="API token" />
-        <button id="saveTokenBtn" type="button">Save Token</button>
-        <button id="refreshAllBtn" type="button">Refresh</button>
-      </div>
-    </header>
+  <body data-page="home">
+    <div class="marketing-shell">
+      <header class="hero">
+        <nav class="nav">
+          <a class="brand" href="/">LocCount</a>
+          <div class="nav-links">
+            <a href="#products">Products</a>
+            <a href="#why">Why It Wins</a>
+            <a href="#launch">Launch</a>
+            <a class="nav-cta" href="/console">Open Console</a>
+          </div>
+        </nav>
 
-    <main class="layout">
-      <section class="panel">
-        <h2>Sites</h2>
-        <form id="siteForm" class="form">
-          <input name="id" placeholder="site id" required />
-          <input name="domain" placeholder="domain" required />
-          <input name="tenant_id" placeholder="tenant id (optional)" />
-          <input name="panel_type" placeholder="panel type" value="ai_vps_panel" />
-          <input name="runtime_type" placeholder="runtime type" value="php_generic" />
-          <button type="submit">Save Site</button>
-        </form>
-        <ul id="siteList" class="list"></ul>
-      </section>
+        <section class="hero-copy">
+          <p class="eyebrow">AI Growth Stack</p>
+          <h1>Paid traffic, SEO, hosting, and web ops under one AI control plane.</h1>
+          <p class="lede">
+            LocCount turns your plugin suite into a marketable SaaS surface: dedicated product pages,
+            a live console, billing-aware operations, and Vault-backed security workflows.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#products">Explore Products</a>
+            <a class="button secondary" href="/pricing">View Pricing</a>
+          </div>
+          <ul class="signal-strip">
+            <li>Target-CPA ad automation</li>
+            <li>Tenant-scoped fleet operations</li>
+            <li>Vault-backed key rotation</li>
+            <li>Raspberry Pi and VPS deploy paths</li>
+          </ul>
+        </section>
+      </header>
 
-      <section class="panel">
-        <h2>Chat</h2>
-        <form id="chatForm" class="form">
-          <select id="chatSiteSelect" required></select>
-          <textarea id="chatMessageInput" rows="4" placeholder="Type command prompt for AI agent"></textarea>
-          <button type="submit">Send</button>
-        </form>
-        <div id="chatOutput" class="output"></div>
-      </section>
+      <main>
+        <section class="section" id="products">
+          <div class="section-heading">
+            <p class="eyebrow">Product URLs</p>
+            <h2>Each plugin now has its own public URL.</h2>
+          </div>
+          <div class="product-grid" id="productGrid"></div>
+        </section>
 
-      <section class="panel">
-        <h2>Action Queue</h2>
-        <div class="inline-controls">
-          <select id="queueStatusFilter">
-            <option value="">All</option>
-            <option value="pending">Pending</option>
-            <option value="approved">Approved</option>
-            <option value="executed">Executed</option>
-            <option value="failed">Failed</option>
-          </select>
-          <button id="loadQueueBtn" type="button">Load Queue</button>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Site</th>
-              <th>Type</th>
-              <th>Risk</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="queueTableBody"></tbody>
-        </table>
-      </section>
+        <section class="section proof-band" id="why">
+          <div class="proof-card">
+            <p class="proof-number">1</p>
+            <h3>Acquire</h3>
+            <p>AI ad generation, testing, and CPA control across paid channels.</p>
+          </div>
+          <div class="proof-card">
+            <p class="proof-number">2</p>
+            <h3>Convert</h3>
+            <p>Sitebuilding, landing flow improvements, and lead capture orchestration.</p>
+          </div>
+          <div class="proof-card">
+            <p class="proof-number">3</p>
+            <h3>Operate</h3>
+            <p>Hosting, cache, DNS, security, audit, and control-plane automation.</p>
+          </div>
+        </section>
 
-      <section class="panel">
-        <h2>Audit</h2>
-        <button id="loadAuditBtn" type="button">Load Audit</button>
-        <ul id="auditList" class="list"></ul>
-      </section>
-    </main>
+        <section class="section launch-section" id="launch">
+          <div class="launch-copy">
+            <p class="eyebrow">MVP Positioning</p>
+            <h2>From internal tooling to buyer-facing SaaS.</h2>
+            <p>
+              The operational console stays available at <code>/console</code>. The public front door now
+              presents the suite like a real product catalog, with a dedicated narrative and CTA path for
+              every plugin.
+            </p>
+          </div>
+          <div class="launch-panel">
+            <p class="panel-label">Core URLs</p>
+            <ul id="urlList" class="url-list"></ul>
+          </div>
+        </section>
 
-    <script type="module" src="/app.js"></script>
+        <section class="section">
+          <div class="section-heading">
+            <p class="eyebrow">Demo Request</p>
+            <h2>Capture demand instead of sending people to a dead end.</h2>
+          </div>
+          <form id="leadCaptureForm" class="lead-form">
+            <input name="name" placeholder="Your name" required />
+            <input name="email" type="email" placeholder="Work email" required />
+            <input name="company" placeholder="Company" />
+            <select name="product_slug">
+              <option value="">Choose product</option>
+              <option value="ai-addwords-meta">AI AddWords Meta</option>
+              <option value="seo-traffic">SEO Traffic</option>
+              <option value="ai-webadmin">AI WebAdmin</option>
+              <option value="cache-ops">Cache Ops</option>
+              <option value="hosting-ops">Hosting Ops</option>
+              <option value="sitebuilder">Sitebuilder 1.0</option>
+              <option value="tolldns">TollDNS</option>
+              <option value="ai-vps-control-panel">AI VPS Control Panel</option>
+            </select>
+            <textarea name="message" rows="4" placeholder="What do you want to automate first?"></textarea>
+            <button class="button primary" type="submit">Request Demo</button>
+            <p id="leadCaptureState" class="form-state"></p>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/marketing.js"></script>
   </body>
 </html>
