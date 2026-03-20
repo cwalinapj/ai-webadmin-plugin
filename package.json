@@ -1,0 +1,18 @@
+{
+  "name": "ai-webadmin-plugin-suite",
+  "private": true,
+  "workspaces": [
+    "apps/control-plane-worker"
+  ],
+  "scripts": {
+    "install:worker": "npm --prefix apps/control-plane-worker install",
+    "dev:worker": "npm --prefix apps/control-plane-worker run dev",
+    "test:worker": "npm --prefix apps/control-plane-worker test",
+    "test:php-agent": "composer --working-dir apps/webadmin-edge-agent test",
+    "test": "npm run test:worker && npm run test:php-agent",
+    "migrate:worker:local": "npm --prefix apps/control-plane-worker run d1:migrate",
+    "migrate:worker:remote": "npm --prefix apps/control-plane-worker run d1:migrate:remote",
+    "build:edge-agent-zip": "./scripts/build-webadmin-edge-agent-zip.sh",
+    "build": "npm run build:edge-agent-zip"
+  }
+}

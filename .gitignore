@@ -1,13 +1,17 @@
 # Node
 node_modules/
 apps/control-plane-worker/node_modules/
+apps/*/node_modules/
+apps/*/dist/
 
 # Wrangler
 .wrangler/
+apps/*/.wrangler/
 
 # Composer
 vendor/
 apps/webadmin-edge-agent/vendor/
+plugins/*/vendor/
 
 # OS
 .DS_Store
@@ -18,3 +22,7 @@ apps/webadmin-edge-agent/vendor/
 # WP-Env runtime
 .wp-env/
 apps/storage-anchor-worker/package-lock.json
+
+# Local sandboxes and exports
+.sandbox/
+exports/

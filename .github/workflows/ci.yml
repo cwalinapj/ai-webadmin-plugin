@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+jobs:
+  worker-tests:
+    name: Worker Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/control-plane-worker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/control-plane-worker/package-lock.json
+
+      - name: Install worker dependencies
+        run: npm ci
+
+      - name: Run worker tests
+        run: npm test
+
+  php-agent-tests:
+    name: PHP Agent Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/webadmin-edge-agent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          tools: composer:v2
+          coverage: none
+
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Run PHPUnit
+        run: composer test
+
+      - name: Build edge-agent zip
+        working-directory: .
+        run: ./scripts/build-webadmin-edge-agent-zip.sh

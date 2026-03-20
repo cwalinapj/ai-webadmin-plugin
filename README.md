@@ -43,6 +43,24 @@ repo/
 
 ## Local development
 
+### Root commands
+
+Use the root workspace commands to avoid remembering per-app entrypoints:
+
+```bash
+npm run install:worker
+npm test
+npm run build
+```
+
+Available root scripts:
+- `npm run dev:worker`
+- `npm run test:worker`
+- `npm run test:php-agent`
+- `npm run migrate:worker:local`
+- `npm run migrate:worker:remote`
+- `npm run build:edge-agent-zip`
+
 ### WP-Env
 - Requires Node 20+ and Docker.
 - Plugin mounted from `./apps/webadmin-edge-agent`.
@@ -179,6 +197,7 @@ GitHub Actions workflow:
 - Runs worker tests (including Ethereum/Solana wallet-login verification path).
 - Runs WordPress edge-agent PHPUnit suite.
 - Runs PHP lint for `plugins/ai-webadmin`, `plugins/tolldns`, `plugins/toll-comments`, `plugins/wp-optin`, and `plugins/ai-addwords-meta-plugin`.
+- Builds the installable `webadmin-edge-agent.zip` artifact as a packaging smoke check.
 
 ## GitHub repo rename
 
