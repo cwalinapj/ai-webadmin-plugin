@@ -8,6 +8,31 @@ on:
   pull_request:
 
 jobs:
+  control-panel-smoke:
+    name: Control Panel Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/panel-addon-core/package-lock.json
+            apps/ai-vps-control-panel/package-lock.json
+
+      - name: Install panel addon core dependencies
+        run: npm --prefix apps/panel-addon-core ci
+
+      - name: Install control panel dependencies
+        run: npm --prefix apps/ai-vps-control-panel ci
+
+      - name: Run control panel queue/approve/execute smoke test
+        run: npm --prefix apps/ai-vps-control-panel test -- --run tests/server.test.ts -t "emits audit metrics/log fields for queue approve execute flow"
+
   host-ops-smoke:
     name: Host Ops Smoke
     runs-on: ubuntu-latest

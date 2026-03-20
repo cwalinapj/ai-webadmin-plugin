@@ -1138,6 +1138,108 @@ describe('ai vps control panel api', () => {
     expect(executeBody.stdout).toContain('"snapshot":"completed"');
   });
 
+  it('emits audit metrics/log fields for queue approve execute flow', async () => {
+    const createSiteRes = await fetch(`${baseUrl}/api/sites`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'ci-smoke-audit-site',
+        tenant_id: 'tenant-a',
+        domain: 'ci-smoke-audit.example.com',
+        panel_type: 'ai_vps_panel',
+        runtime_type: 'php_generic',
+      }),
+    });
+    expect(createSiteRes.status).toBe(201);
+
+    const queueRes = await fetch(`${baseUrl}/api/actions/queue`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        site_id: 'ci-smoke-audit-site',
+        action: {
+          type: 'run_site_snapshot',
+          description: 'ci smoke queue approve execute',
+          risk: 'medium',
+          requires_confirmation: true,
+          args: {
+            site: 'ci-smoke-audit-site',
+            site_path: '/tmp/ci-smoke-audit-site',
+            output_dir: '/tmp',
+          },
+        },
+      }),
+    });
+    const queueBody = (await queueRes.json()) as { ok: boolean; action: { id: string } };
+    expect(queueRes.status).toBe(201);
+    expect(queueBody.ok).toBe(true);
+    const actionId = queueBody.action.id;
+
+    const approveRes = await fetch(`${baseUrl}/api/actions/${encodeURIComponent(actionId)}/approve`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    });
+    expect(approveRes.status).toBe(200);
+
+    const executeRes = await fetch(`${baseUrl}/api/actions/${encodeURIComponent(actionId)}/execute`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        dry_run: true,
+        confirmed: true,
+      }),
+    });
+    const executeBody = (await executeRes.json()) as { ok: boolean; dry_run: boolean };
+    expect(executeRes.status).toBe(200);
+    expect(executeBody.ok).toBe(true);
+    expect(executeBody.dry_run).toBe(true);
+
+    const auditRes = await fetch(`${baseUrl}/api/audit?limit=300`, {
+      headers: authHeaders('admin-a'),
+    });
+    const auditBody = (await auditRes.json()) as {
+      ok: boolean;
+      logs: Array<{ event_type: string; payload: Record<string, unknown> }>;
+    };
+    expect(auditRes.status).toBe(200);
+    expect(auditBody.ok).toBe(true);
+
+    const queued = auditBody.logs.find(
+      (item) => item.event_type === 'action.queued_manual' && item.payload?.action_id === actionId,
+    );
+    const approved = auditBody.logs.find(
+      (item) => item.event_type === 'action.approved' && item.payload?.action_id === actionId,
+    );
+    const executed = auditBody.logs.find(
+      (item) => item.event_type === 'action.executed' && item.payload?.action_id === actionId,
+    );
+
+    expect(queued).toBeDefined();
+    expect(queued?.payload?.type).toBe('run_site_snapshot');
+    expect(typeof queued?.payload?.conversation_id).toBe('string');
+
+    expect(approved).toBeDefined();
+    expect(approved?.payload?.status).toBe('approved');
+
+    expect(executed).toBeDefined();
+    expect(executed?.payload?.status).toBe('executed');
+    expect(executed?.payload?.ok).toBe(true);
+    expect(executed?.payload?.dry_run).toBe(true);
+  });
+
   it('dedupes manual queue submissions by idempotency key', async () => {
     const createSiteRes = await fetch(`${baseUrl}/api/sites`, {
       method: 'POST',
