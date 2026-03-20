@@ -221,11 +221,7 @@ async function loadQueue() {
       exec.textContent = "Execute (Dry)";
       exec.addEventListener("click", async () => {
         try {
-          await api(`/api/actions/${encodeURIComponent(action.id)}/execute`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ dry_run: true, confirmed: true }),
-          });
+          await executeQueuedAction(action.id, true);
           await loadQueue();
           await loadAudit();
           await loadFleetRisk();
@@ -234,10 +230,37 @@ async function loadQueue() {
         }
       });
       actionCell.appendChild(exec);
+
+      const execLive = document.createElement("button");
+      execLive.textContent = "Execute Live";
+      execLive.className = "danger";
+      execLive.addEventListener("click", async () => {
+        try {
+          const confirmed = window.prompt(`Type LIVE to execute action ${action.id} on ${action.site_id}`) || "";
+          if (confirmed.trim().toUpperCase() !== "LIVE") {
+            return;
+          }
+          await executeQueuedAction(action.id, false);
+          await loadQueue();
+          await loadAudit();
+          await loadFleetRisk();
+        } catch (error) {
+          alert(error.message);
+        }
+      });
+      actionCell.appendChild(execLive);
     }
 
     queueTableBody.appendChild(tr);
   }
+}
+
+async function executeQueuedAction(actionId, dryRun) {
+  return api(`/api/actions/${encodeURIComponent(actionId)}/execute`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ dry_run: dryRun, confirmed: true }),
+  });
 }
 
 async function loadAudit() {

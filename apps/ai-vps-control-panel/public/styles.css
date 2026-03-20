@@ -140,6 +140,12 @@ button.secondary {
   color: var(--accent-2);
 }
 
+button.danger {
+  background: #9e2a2b;
+  border-color: #6f1d1b;
+  color: #fff;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
