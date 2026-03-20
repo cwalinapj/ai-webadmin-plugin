@@ -135,7 +135,7 @@ class AnalyticsGoogle
     /**
      * @return array<string, mixed>
      */
-    public function deploy(string $source = 'manual'): array
+    public function deploy(string $source = 'manual', bool $dryRun = false): array
     {
         $siteId = $this->resolveSiteId();
         if ($siteId === '') {
@@ -159,7 +159,7 @@ class AnalyticsGoogle
             'secondary_conversions' => $this->splitLines((string)$settings['analytics_secondary_conversions']),
             'funnel_steps' => $this->splitLines((string)$settings['analytics_funnel_steps']),
             'key_pages' => $this->splitLines((string)$settings['analytics_key_pages']),
-            'dry_run' => false,
+            'dry_run' => $dryRun,
         ];
 
         $response = $this->client->requestJson(
@@ -170,22 +170,50 @@ class AnalyticsGoogle
         );
 
         if (!empty($response['ok']) && isset($response['body']) && is_array($response['body'])) {
-            $deployJson = wp_json_encode($response['body'], JSON_PRETTY_PRINT);
+            $deployBody = $response['body'];
+            $deployStatus = $dryRun ? 'dry_run' : 'ok';
+            $deployMessage = $dryRun
+                ? 'Preview generated. Review diff and deploy plan.'
+                : 'Google deploy completed.';
+
+            if (!$dryRun) {
+                $verification = $this->status('post_deploy_verify');
+                $verified = !empty($verification['ok']) && !empty($verification['body']['connected']);
+                $deployBody['post_deploy_verification'] = [
+                    'connected' => $verified,
+                    'status_response' => $verification['body'] ?? [],
+                ];
+                if ($verified) {
+                    $deployMessage = 'Google deploy completed and verification succeeded.';
+                } else {
+                    $deployStatus = 'warning';
+                    $deployMessage = 'Deploy completed, but verification failed. Rollback is recommended.';
+                    $this->tabState->addFinding('analytics', 'warning', 'Deploy verification failed', 'Deploy finished but verification did not confirm an active connected account. Review and rollback if needed.');
+                }
+            }
+
+            $deployJson = wp_json_encode($deployBody, JSON_PRETTY_PRINT);
             $this->options->saveSettings([
-                'analytics_google_last_deploy_json' => is_string($deployJson) ? $deployJson : '',
-                'analytics_google_last_deploy_status' => 'ok',
-                'analytics_google_last_deploy_message' => 'Google deploy completed.',
+                'analytics_google_last_deploy_json' => $this->capDeployArtifact($deployJson),
+                'analytics_google_last_deploy_status' => $deployStatus,
+                'analytics_google_last_deploy_message' => $deployMessage,
                 'analytics_google_last_deploy_at' => time(),
             ]);
-            $this->tabState->recordSync('analytics', 'ok', 'Google deploy completed.');
-            $this->tabState->addFinding('analytics', 'info', 'Google deploy complete', 'GTM and GA4 conversions were deployed.');
-            $this->jobStore->add('analytics', 'google_deploy', 'completed', 0.0, false, ['source' => $source]);
-            $this->logger->log('info', 'Google deploy completed', [
+            $tabSyncStatus = $deployStatus === 'warning' ? 'warning' : 'ok';
+            $this->tabState->recordSync('analytics', $tabSyncStatus, $deployMessage);
+            $findingTitle = $dryRun ? 'Google deploy preview generated' : 'Google deploy complete';
+            $findingDetail = $dryRun
+                ? 'Review preview payload for tags/triggers/conversions before applying.'
+                : 'GTM and GA4 conversions were deployed.';
+            $this->tabState->addFinding('analytics', 'info', $findingTitle, $findingDetail);
+            $this->jobStore->add('analytics', $dryRun ? 'google_deploy_preview' : 'google_deploy', 'completed', 0.0, $dryRun, ['source' => $source]);
+            $this->logger->log('info', $dryRun ? 'Google deploy preview generated' : 'Google deploy completed', [
                 'source' => $source,
+                'dry_run' => $dryRun ? '1' : '0',
                 'request_id' => (string)($response['request_id'] ?? ''),
             ]);
         } else {
-            $message = 'Google deploy failed.';
+            $message = $dryRun ? 'Google preview failed.' : 'Google deploy failed.';
             if (!empty($response['status'])) {
                 $message .= ' HTTP ' . (int)$response['status'];
             }
@@ -199,10 +227,11 @@ class AnalyticsGoogle
                 'analytics_google_last_deploy_at' => time(),
             ]);
             $this->tabState->recordSync('analytics', 'error', $message);
-            $this->tabState->addFinding('analytics', 'error', 'Google deploy failed', $message);
-            $this->jobStore->add('analytics', 'google_deploy', 'failed', 0.7, false, ['source' => $source]);
-            $this->logger->log('error', 'Google deploy failed', [
+            $this->tabState->addFinding('analytics', 'error', $dryRun ? 'Google preview failed' : 'Google deploy failed', $message);
+            $this->jobStore->add('analytics', $dryRun ? 'google_deploy_preview' : 'google_deploy', 'failed', 0.7, $dryRun, ['source' => $source]);
+            $this->logger->log('error', $dryRun ? 'Google deploy preview failed' : 'Google deploy failed', [
                 'status' => (string)($response['status'] ?? 0),
+                'dry_run' => $dryRun ? '1' : '0',
                 'request_id' => (string)($response['request_id'] ?? ''),
             ]);
         }
@@ -241,5 +270,27 @@ class AnalyticsGoogle
         }
 
         return array_values(array_unique($result));
+    }
+
+    private function capDeployArtifact($json): string
+    {
+        if (!is_string($json) || $json === '') {
+            return '';
+        }
+
+        $limit = 100000;
+        if (strlen($json) <= $limit) {
+            return $json;
+        }
+
+        $payload = [
+            'truncated' => true,
+            'limit_bytes' => $limit,
+            'message' => 'Deploy artifact exceeded local storage cap and was truncated.',
+            'excerpt' => substr($json, 0, $limit),
+        ];
+        $encoded = wp_json_encode($payload, JSON_PRETTY_PRINT);
+
+        return is_string($encoded) ? $encoded : '';
     }
 }
