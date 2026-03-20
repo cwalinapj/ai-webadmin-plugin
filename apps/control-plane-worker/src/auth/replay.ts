@@ -4,9 +4,28 @@ export interface ReplayResult {
   error?: string;
 }
 
-export async function consumeNonce(db: D1Database, pluginId: string, nonce: string): Promise<ReplayResult> {
-  await db.prepare("DELETE FROM nonces WHERE seen_at < datetime('now', '-1 day')").run();
+export interface ReplayPolicyOptions {
+  retentionSeconds?: number;
+}
 
+const DEFAULT_RETENTION_SECONDS = 24 * 60 * 60;
+
+export async function cleanupReplayArtifacts(
+  db: D1Database,
+  options: ReplayPolicyOptions = {},
+): Promise<void> {
+  const retention = sanitizeRetentionSeconds(options.retentionSeconds);
+  const cutoffDate = new Date(Date.now() - retention * 1000).toISOString();
+
+  await db.prepare('DELETE FROM nonces WHERE seen_at < ?1').bind(cutoffDate).run();
+  await db.prepare('DELETE FROM idempotency_keys WHERE seen_at < ?1').bind(cutoffDate).run();
+}
+
+export async function consumeNonce(
+  db: D1Database,
+  pluginId: string,
+  nonce: string,
+): Promise<ReplayResult> {
   try {
     await db
       .prepare('INSERT INTO nonces (plugin_id, nonce, seen_at) VALUES (?1, ?2, ?3)')
@@ -37,8 +56,6 @@ export async function consumeIdempotencyKey(
     };
   }
 
-  await db.prepare("DELETE FROM idempotency_keys WHERE seen_at < datetime('now', '-1 day')").run();
-
   try {
     await db
       .prepare('INSERT INTO idempotency_keys (plugin_id, idempotency_key, seen_at) VALUES (?1, ?2, ?3)')
@@ -53,4 +70,11 @@ export async function consumeIdempotencyKey(
       error: 'duplicate_idempotency_key',
     };
   }
+}
+
+function sanitizeRetentionSeconds(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_RETENTION_SECONDS;
+  }
+  return Math.max(60, Math.floor(value));
 }

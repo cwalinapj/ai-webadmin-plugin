@@ -1,5 +1,6 @@
 import { verifyLegacySignedRequest } from './auth/verifyLegacySignature';
 import { consumeIdempotencyKey, consumeNonce } from './auth/replay';
+import { resolveRoutePolicy } from './auth/routePolicy';
 import { verifySignedRequest } from './auth/verifySignature';
 import { verifyWalletChallenge, type WalletVerifyPayload } from './auth/verifyWallet';
 import { type GoalAssistantPayload } from './analytics/buildGoalAssistant';
@@ -156,18 +157,15 @@ async function handleHeartbeat(request: Request, env: Env, path: string): Promis
     return json({ ok: false, error: authResult.error }, authResult.status);
   }
 
-  const nonceResult = await consumeNonce(env.DB, authResult.pluginId, authResult.nonce);
-  if (!nonceResult.ok) {
-    return json({ ok: false, error: nonceResult.error }, nonceResult.status ?? 409);
-  }
-
-  const idempotencyResult = await consumeIdempotencyKey(
-    env.DB,
+  const replayGuard = await enforceReplayProtection(
+    request,
+    env,
+    path,
     authResult.pluginId,
-    request.headers.get('Idempotency-Key'),
+    authResult.nonce,
   );
-  if (!idempotencyResult.ok) {
-    return json({ ok: false, error: idempotencyResult.error }, idempotencyResult.status ?? 400);
+  if (!replayGuard.ok) {
+    return replayGuard.response;
   }
 
   const payloadResult = parseHeartbeatPayload(rawBody);
@@ -881,23 +879,17 @@ async function authorizeSignedMutation(
     return { authorized: false, response: json({ ok: false, error: authResult.error }, authResult.status) };
   }
 
-  const nonceResult = await consumeNonce(env.DB, authResult.pluginId, authResult.nonce);
-  if (!nonceResult.ok) {
-    return {
-      authorized: false,
-      response: json({ ok: false, error: nonceResult.error }, nonceResult.status ?? 409),
-    };
-  }
-
-  const idempotencyResult = await consumeIdempotencyKey(
-    env.DB,
+  const replayGuard = await enforceReplayProtection(
+    request,
+    env,
+    path,
     authResult.pluginId,
-    request.headers.get('Idempotency-Key'),
+    authResult.nonce,
   );
-  if (!idempotencyResult.ok) {
+  if (!replayGuard.ok) {
     return {
       authorized: false,
-      response: json({ ok: false, error: idempotencyResult.error }, idempotencyResult.status ?? 400),
+      response: replayGuard.response,
     };
   }
 
@@ -906,6 +898,42 @@ async function authorizeSignedMutation(
     rawBody,
     pluginId: authResult.pluginId,
   };
+}
+
+async function enforceReplayProtection(
+  request: Request,
+  env: Env,
+  path: string,
+  pluginId: string,
+  nonce: string,
+): Promise<{ ok: true } | { ok: false; response: Response }> {
+  const policy = resolveRoutePolicy(path);
+
+  if (policy.requireNonce) {
+    const nonceResult = await consumeNonce(env.DB, pluginId, nonce);
+    if (!nonceResult.ok) {
+      return {
+        ok: false,
+        response: json({ ok: false, error: nonceResult.error }, nonceResult.status ?? 409),
+      };
+    }
+  }
+
+  if (policy.requireIdempotency) {
+    const idempotencyResult = await consumeIdempotencyKey(
+      env.DB,
+      pluginId,
+      request.headers.get('Idempotency-Key'),
+    );
+    if (!idempotencyResult.ok) {
+      return {
+        ok: false,
+        response: json({ ok: false, error: idempotencyResult.error }, idempotencyResult.status ?? 400),
+      };
+    }
+  }
+
+  return { ok: true };
 }
 
 function parseHeartbeatPayload(
@@ -1852,10 +1880,70 @@ function optionalFiniteNumber(value: unknown): number | undefined {
 }
 
 function json(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
+  return new Response(JSON.stringify(normalizeErrorPayload(payload, status)), {
     status,
     headers: {
       'content-type': 'application/json',
     },
   });
+}
+
+export function normalizeErrorPayload(payload: unknown, status: number): unknown {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return payload;
+  }
+
+  const record = payload as Record<string, unknown>;
+  if (record.ok !== false) {
+    return payload;
+  }
+
+  const rawCode = record.error_code ?? record.error;
+  const errorCode =
+    typeof rawCode === 'string' && rawCode.trim() !== '' ? rawCode.trim() : 'unknown_error';
+  const rawMessage = record.message;
+  const message =
+    typeof rawMessage === 'string' && rawMessage.trim() !== ''
+      ? rawMessage.trim()
+      : defaultErrorMessage(errorCode, status);
+
+  const normalized: Record<string, unknown> = {
+    ...record,
+    ok: false,
+    error_code: errorCode,
+    message,
+  };
+
+  if (!('details' in normalized) && 'error_details' in normalized) {
+    normalized.details = normalized.error_details;
+  }
+
+  if (!('error' in normalized)) {
+    normalized.error = errorCode;
+  }
+
+  return normalized;
+}
+
+function defaultErrorMessage(errorCode: string, status: number): string {
+  if (status === 401) {
+    return 'Authentication failed.';
+  }
+  if (status === 403) {
+    return 'Access forbidden for this capability.';
+  }
+  if (status === 404) {
+    return 'Requested route or resource was not found.';
+  }
+  if (status === 409) {
+    return 'Conflict detected for this request.';
+  }
+  if (status >= 500) {
+    return 'Control plane encountered an internal error.';
+  }
+  if (status >= 400) {
+    return 'Request validation failed.';
+  }
+
+  return errorCode.replace(/_/g, ' ');
 }
