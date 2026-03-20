@@ -6,6 +6,12 @@ import { verifyWalletChallenge, type WalletVerifyPayload } from './auth/verifyWa
 import { type GoalAssistantPayload } from './analytics/buildGoalAssistant';
 import { buildGoalAssistantPlanWithAI } from './analytics/buildGoalAssistantWithAI';
 import { runWatchdogLbAutomation, type WatchdogLbAutomationResult } from './automation/watchdogLbAutomation';
+import { checkSandboxBillingAccess, upsertBillingSubscription } from './billing/subscription';
+import {
+  evaluateAndReserveSandboxBudget,
+  reconcileSandboxBudgetReservation,
+  type SandboxBudgetDecision,
+} from './cost/sandboxBudget';
 import { withSiteLock } from './durable/withSiteLock';
 import { ensureGa4Conversions } from './google/ga4';
 import { deployGtm } from './google/gtm';
@@ -44,6 +50,10 @@ import type { Env } from './types';
 
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
+
+  if (request.method === 'POST' && matchesPath(url.pathname, ['/internal/billing/subscription/upsert'])) {
+    return handleInternalBillingSubscriptionUpsert(request, env);
+  }
 
   if (
     request.method === 'POST' &&
@@ -142,6 +152,52 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
 function matchesPath(pathname: string, candidates: string[]): boolean {
   return candidates.includes(pathname);
+}
+
+async function handleInternalBillingSubscriptionUpsert(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const token = env.BILLING_INTERNAL_API_TOKEN?.trim() ?? '';
+  if (token === '') {
+    return json({ ok: false, error: 'billing_internal_api_token_not_configured' }, 500);
+  }
+
+  const authorization = request.headers.get('authorization')?.trim() ?? '';
+  const incomingToken = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  if (!timingSafeEqual(incomingToken, token)) {
+    return json({ ok: false, error: 'forbidden' }, 403);
+  }
+
+  const payloadResult = parseBillingSubscriptionUpsertPayload(await request.arrayBuffer());
+  if (!payloadResult.ok) {
+    return json({ ok: false, error: payloadResult.error }, 400);
+  }
+
+  try {
+    await upsertBillingSubscription(env.DB, {
+      siteId: payloadResult.payload.site_id,
+      pluginId: payloadResult.payload.plugin_id,
+      planCode: payloadResult.payload.plan_code,
+      status: payloadResult.payload.status,
+      sandboxEnabled: payloadResult.payload.sandbox_enabled,
+      currentPeriodEnd: payloadResult.payload.current_period_end,
+      gracePeriodEnd: payloadResult.payload.grace_period_end,
+    });
+  } catch {
+    return json({ ok: false, error: 'billing_upsert_failed' }, 500);
+  }
+
+  return json(
+    {
+      ok: true,
+      site_id: payloadResult.payload.site_id,
+      plugin_id: payloadResult.payload.plugin_id,
+      status: payloadResult.payload.status,
+      sandbox_enabled: payloadResult.payload.sandbox_enabled,
+    },
+    200,
+  );
 }
 
 async function handleHeartbeat(request: Request, env: Env, path: string): Promise<Response> {
@@ -571,7 +627,51 @@ async function handleSandboxRequest(request: Request, env: Env, path: string): P
     return json({ ok: false, error: payloadResult.error }, 400);
   }
 
+  const requestId = crypto.randomUUID();
+  let budgetDecision: SandboxBudgetDecision | null = null;
+  if (typeof (env.DB as { prepare?: unknown }).prepare === 'function') {
+    const billingEnforcementEnabled = toBoolean(env.BILLING_SANDBOX_ENFORCEMENT, false);
+    const billing = await checkSandboxBillingAccess(env.DB, {
+      siteId: payloadResult.payload.site_id,
+      pluginId: auth.pluginId,
+      defaultAllow: toBoolean(env.BILLING_SANDBOX_DEFAULT_ALLOW, true),
+    });
+    if (billingEnforcementEnabled && !billing.allowed) {
+      return json(
+        {
+          ok: false,
+          error: 'sandbox_subscription_inactive',
+          subscription_status: billing.status,
+          reason: billing.reason,
+        },
+        402,
+      );
+    }
+
+    budgetDecision = await evaluateAndReserveSandboxBudget(env.DB, {
+      siteId: payloadResult.payload.site_id,
+      pluginId: auth.pluginId,
+      requestId,
+      estimatedMinutes: payloadResult.payload.estimated_minutes,
+      allowOverage: payloadResult.payload.allow_overage,
+      defaultBudgetUsd: numberOrDefault(env.SANDBOX_DEFAULT_MONTHLY_BUDGET_USD, 50),
+      defaultCostPerMinuteUsd: numberOrDefault(env.SANDBOX_DEFAULT_COST_PER_MINUTE_USD, 0.08),
+      defaultHardLimit: toBoolean(env.SANDBOX_DEFAULT_HARD_LIMIT, true),
+    });
+    if (!budgetDecision.allowed) {
+      return json(
+        {
+          ok: false,
+          error: 'sandbox_budget_exceeded',
+          budget: budgetDecision,
+        },
+        402,
+      );
+    }
+  }
+
   const record = await createSandboxRequest(env.DB, {
+    requestId,
     pluginId: auth.pluginId,
     siteId: payloadResult.payload.site_id,
     requestedByAgent: payloadResult.payload.requested_by_agent,
@@ -586,6 +686,7 @@ async function handleSandboxRequest(request: Request, env: Env, path: string): P
     {
       ok: true,
       request: record,
+      budget: budgetDecision,
     },
     201,
   );
@@ -722,11 +823,24 @@ async function handleSandboxRelease(request: Request, env: Env, path: string): P
     return json({ ok: false, error: 'sandbox_release_conflict' }, 409);
   }
 
+  let reconciliation:
+    | Awaited<ReturnType<typeof reconcileSandboxBudgetReservation>>
+    | { ok: false; reason: 'unsupported_mock_db' } = { ok: false, reason: 'unsupported_mock_db' };
+  if (typeof (env.DB as { prepare?: unknown }).prepare === 'function') {
+    reconciliation = await reconcileSandboxBudgetReservation(env.DB, {
+      requestId: payloadResult.payload.request_id,
+      siteId: requestRecord.site_id,
+      actualMinutes: payloadResult.payload.actual_runtime_minutes ?? requestRecord.estimated_minutes,
+      outcome: payloadResult.payload.outcome,
+    });
+  }
+
   return json(
     {
       ok: true,
       request_id: payloadResult.payload.request_id,
       outcome: payloadResult.payload.outcome,
+      billing_reconciliation: reconciliation,
     },
     200,
   );
@@ -1267,6 +1381,7 @@ function parseSandboxRequestPayload(
         task_type: string;
         priority_base: number;
         estimated_minutes: number;
+        allow_overage: boolean;
         earliest_start_at: string | null;
         context_json: string | null;
       };
@@ -1309,6 +1424,7 @@ function parseSandboxRequestPayload(
       task_type: taskType,
       priority_base: priorityBase,
       estimated_minutes: estimatedMinutes,
+      allow_overage: toBoolean(payload.allow_overage, false),
       earliest_start_at: earliestStartAt,
       context_json: contextJson,
     },
@@ -1418,6 +1534,7 @@ function parseSandboxReleasePayload(
         agent_id: string;
         outcome: 'completed' | 'failed' | 'requeue';
         note: string | null;
+        actual_runtime_minutes: number | null;
       };
     }
   | {
@@ -1444,6 +1561,13 @@ function parseSandboxReleasePayload(
     typeof payload.note === 'string' && payload.note.trim() !== ''
       ? payload.note.trim().slice(0, 500)
       : null;
+  const actualRuntimeRaw =
+    typeof payload.actual_runtime_minutes === 'number' || typeof payload.actual_runtime_minutes === 'string'
+      ? Number.parseInt(String(payload.actual_runtime_minutes), 10)
+      : NaN;
+  const actualRuntimeMinutes = Number.isInteger(actualRuntimeRaw)
+    ? Math.max(0, Math.min(1440, actualRuntimeRaw))
+    : null;
 
   return {
     ok: true,
@@ -1452,6 +1576,7 @@ function parseSandboxReleasePayload(
       agent_id: agentId,
       outcome,
       note,
+      actual_runtime_minutes: actualRuntimeMinutes,
     },
   };
 }
@@ -1698,6 +1823,63 @@ function parseJsonObjectBody(
   };
 }
 
+function parseBillingSubscriptionUpsertPayload(
+  rawBody: ArrayBuffer,
+):
+  | {
+      ok: true;
+      payload: {
+        site_id: string;
+        plugin_id: string;
+        plan_code: string;
+        status: 'active' | 'trialing' | 'past_due' | 'canceled' | 'unpaid';
+        sandbox_enabled: boolean;
+        current_period_end: string | null;
+        grace_period_end: string | null;
+      };
+    }
+  | {
+      ok: false;
+      error: string;
+    } {
+  const parsedResult = parseJsonObjectBody(rawBody);
+  if (!parsedResult.ok) {
+    return parsedResult;
+  }
+
+  const payload = parsedResult.payload;
+  const siteId = typeof payload.site_id === 'string' ? payload.site_id.trim() : '';
+  const pluginId = typeof payload.plugin_id === 'string' ? payload.plugin_id.trim() : '';
+  if (siteId === '' || pluginId === '') {
+    return { ok: false, error: 'missing_site_or_plugin' };
+  }
+
+  const status = normalizeBillingStatus(
+    typeof payload.status === 'string' ? payload.status.trim().toLowerCase() : '',
+  );
+  if (!status) {
+    return { ok: false, error: 'invalid_billing_status' };
+  }
+
+  const planCode =
+    typeof payload.plan_code === 'string' && payload.plan_code.trim() !== ''
+      ? payload.plan_code.trim()
+      : 'sandbox_monthly';
+
+  return {
+    ok: true,
+    payload: {
+      site_id: siteId,
+      plugin_id: pluginId,
+      plan_code: planCode,
+      status,
+      sandbox_enabled: toBoolean(payload.sandbox_enabled, true),
+      current_period_end: normalizeOptionalIsoString(payload.current_period_end),
+      grace_period_end: normalizeOptionalIsoString(payload.grace_period_end),
+    },
+  };
+}
+
 function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
   const parsed =
     typeof value === 'number'
@@ -1879,6 +2061,47 @@ function optionalFiniteNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+function toBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return true;
+    }
+    if (value === 0) {
+      return false;
+    }
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on') {
+      return true;
+    }
+    if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') {
+      return false;
+    }
+  }
+
+  return fallback;
+}
+
+function normalizeBillingStatus(
+  value: string,
+): 'active' | 'trialing' | 'past_due' | 'canceled' | 'unpaid' | null {
+  if (
+    value === 'active' ||
+    value === 'trialing' ||
+    value === 'past_due' ||
+    value === 'canceled' ||
+    value === 'unpaid'
+  ) {
+    return value;
+  }
+
+  return null;
+}
+
 function json(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(normalizeErrorPayload(payload, status)), {
     status,
@@ -1946,4 +2169,17 @@ function defaultErrorMessage(errorCode: string, status: number): string {
   }
 
   return errorCode.replace(/_/g, ' ');
+}
+
+function timingSafeEqual(left: string, right: string): boolean {
+  if (left.length !== right.length || left.length === 0) {
+    return false;
+  }
+
+  let mismatch = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    mismatch |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+
+  return mismatch === 0;
 }

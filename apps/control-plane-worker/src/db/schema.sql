@@ -153,3 +153,137 @@ CREATE TABLE IF NOT EXISTS watchdog_automation_state (
 
 CREATE INDEX IF NOT EXISTS idx_watchdog_automation_plugin_updated
   ON watchdog_automation_state (plugin_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS performance_slo_state (
+  site_id TEXT PRIMARY KEY,
+  plugin_id TEXT NOT NULL,
+  goals_json TEXT NOT NULL,
+  baseline_signals_json TEXT NOT NULL,
+  latest_result_json TEXT NOT NULL,
+  latest_status TEXT NOT NULL,
+  last_rollback_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_performance_slo_status_updated
+  ON performance_slo_state (latest_status, updated_at);
+
+CREATE TABLE IF NOT EXISTS safe_update_runs (
+  id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL,
+  plugin_id TEXT NOT NULL,
+  dry_run INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL,
+  targets_json TEXT NOT NULL,
+  candidates_json TEXT NOT NULL,
+  workflow_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_safe_update_runs_site_created
+  ON safe_update_runs (site_id, created_at);
+
+CREATE TABLE IF NOT EXISTS billing_subscriptions (
+  site_id TEXT PRIMARY KEY,
+  plugin_id TEXT NOT NULL,
+  plan_code TEXT NOT NULL DEFAULT 'sandbox_monthly',
+  status TEXT NOT NULL,
+  sandbox_enabled INTEGER NOT NULL DEFAULT 1,
+  current_period_end TEXT,
+  grace_period_end TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_subscriptions_plugin_status
+  ON billing_subscriptions (plugin_id, status, updated_at);
+
+CREATE TABLE IF NOT EXISTS job_artifacts (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  site_id TEXT NOT NULL,
+  artifact_type TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_job_created
+  ON job_artifacts (job_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_site_created
+  ON job_artifacts (site_id, created_at);
+
+CREATE TABLE IF NOT EXISTS incident_reports (
+  id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL,
+  plugin_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  trigger_source TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  timeline_json TEXT NOT NULL,
+  diagnostics_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_incident_reports_site_created
+  ON incident_reports (site_id, created_at);
+
+CREATE TABLE IF NOT EXISTS site_cost_policies (
+  site_id TEXT PRIMARY KEY,
+  plugin_id TEXT NOT NULL,
+  plan_code TEXT NOT NULL DEFAULT 'sandbox_monthly',
+  monthly_budget_usd REAL NOT NULL DEFAULT 50,
+  sandbox_cost_per_minute_usd REAL NOT NULL DEFAULT 0.08,
+  hard_limit INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_site_cost_policies_plan_updated
+  ON site_cost_policies (plan_code, updated_at);
+
+CREATE TABLE IF NOT EXISTS site_usage_counters (
+  site_id TEXT PRIMARY KEY,
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  sandbox_minutes INTEGER NOT NULL DEFAULT 0,
+  sandbox_cost_usd REAL NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_site_usage_counters_period
+  ON site_usage_counters (period_start, period_end, updated_at);
+
+CREATE TABLE IF NOT EXISTS sandbox_budget_reservations (
+  request_id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL,
+  reserved_minutes INTEGER NOT NULL,
+  reserved_cost_usd REAL NOT NULL,
+  cost_per_minute_usd REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'reserved',
+  reserved_at TEXT NOT NULL,
+  actual_minutes INTEGER,
+  actual_cost_usd REAL,
+  reconciled_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sandbox_budget_reservations_site_status
+  ON sandbox_budget_reservations (site_id, status, reserved_at);
+
+CREATE TABLE IF NOT EXISTS sandbox_billing_ledger (
+  id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  minutes INTEGER NOT NULL DEFAULT 0,
+  amount_usd REAL NOT NULL DEFAULT 0,
+  details_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sandbox_billing_ledger_site_created
+  ON sandbox_billing_ledger (site_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_sandbox_billing_ledger_request
+  ON sandbox_billing_ledger (request_id, created_at);

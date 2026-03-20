@@ -1,6 +1,7 @@
 import type { RankedSandboxRequest } from './scheduler';
 
 export interface CreateSandboxRequestInput {
+  requestId?: string;
   pluginId: string;
   siteId: string;
   requestedByAgent: string;
@@ -87,7 +88,7 @@ export async function createSandboxRequest(
   input: CreateSandboxRequestInput,
 ): Promise<SandboxRequestRecord> {
   const now = new Date().toISOString();
-  const id = crypto.randomUUID();
+  const id = input.requestId && input.requestId.trim() !== '' ? input.requestId.trim() : crypto.randomUUID();
 
   await db
     .prepare(
