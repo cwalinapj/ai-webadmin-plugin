@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI VPS Control Panel Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="console-kicker">Operations Console</p>
+        <h1>AI VPS Control Panel</h1>
+      </div>
+      <div class="auth auth-grid">
+        <input id="sessionEmailInput" type="email" placeholder="Console email" />
+        <input id="sessionPasswordInput" type="password" placeholder="Console password" />
+        <button id="loginBtn" type="button">Login</button>
+        <button id="logoutBtn" type="button" class="secondary">Logout</button>
+        <input id="tokenInput" type="password" placeholder="API token" />
+        <button id="saveTokenBtn" type="button">Save Token</button>
+        <button id="refreshAllBtn" type="button">Refresh</button>
+      </div>
+    </header>
+    <div class="auth-status-wrap">
+      <p id="authState" class="auth-state">Not authenticated</p>
+      <div id="consoleBillingBadge" class="billing-badge billing-badge-neutral">No billing site selected</div>
+    </div>
+
+    <main class="layout">
+      <section class="panel">
+        <h2>Sites</h2>
+        <form id="siteForm" class="form">
+          <input name="id" placeholder="site id" required />
+          <input name="domain" placeholder="domain" required />
+          <input name="tenant_id" placeholder="tenant id (optional)" />
+          <input name="panel_type" placeholder="panel type" value="ai_vps_panel" />
+          <input name="runtime_type" placeholder="runtime type" value="php_generic" />
+          <button type="submit">Save Site</button>
+        </form>
+        <ul id="siteList" class="list"></ul>
+      </section>
+
+      <section class="panel">
+        <h2>Chat</h2>
+        <form id="chatForm" class="form">
+          <select id="chatSiteSelect" required></select>
+          <textarea id="chatMessageInput" rows="4" placeholder="Type command prompt for AI agent"></textarea>
+          <button type="submit">Send</button>
+        </form>
+        <div id="chatOutput" class="output"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Action Queue</h2>
+        <div class="inline-controls">
+          <select id="queueStatusFilter">
+            <option value="">All</option>
+            <option value="pending">Pending</option>
+            <option value="approved">Approved</option>
+            <option value="executed">Executed</option>
+            <option value="failed">Failed</option>
+          </select>
+          <button id="loadQueueBtn" type="button">Load Queue</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Site</th>
+              <th>Type</th>
+              <th>Risk</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="queueTableBody"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Audit</h2>
+        <button id="loadAuditBtn" type="button">Load Audit</button>
+        <ul id="auditList" class="list"></ul>
+      </section>
+
+      <section class="panel">
+        <h2>Fleet Risk Dashboard</h2>
+        <div class="inline-controls">
+          <input id="fleetRiskWindow" type="number" min="1" max="336" value="24" />
+          <button id="loadFleetRiskBtn" type="button">Load Fleet Risk</button>
+        </div>
+        <div id="fleetRiskSummary" class="output"></div>
+        <table>
+          <thead>
+            <tr>
+              <th>Site</th>
+              <th>Domain</th>
+              <th>Risk</th>
+              <th>Score</th>
+              <th>Pending High</th>
+              <th>Failed (Window)</th>
+              <th>Policies</th>
+            </tr>
+          </thead>
+          <tbody id="fleetRiskTableBody"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Policy Templates</h2>
+        <form id="policyForm" class="form">
+          <input name="name" placeholder="template name" required />
+          <input name="category" placeholder="category (security/performance/updates)" />
+          <input name="description" placeholder="description" />
+          <textarea
+            name="config_json"
+            rows="5"
+            placeholder='{"slo":{"ttfb_ms":300},"security":{"waf":"strict"}}'
+          ></textarea>
+          <button type="submit">Save Template</button>
+        </form>
+        <div class="inline-controls">
+          <input id="policyCategoryFilter" placeholder="filter category" />
+          <select id="policyApplySiteSelect"></select>
+          <button id="loadPoliciesBtn" type="button">Load Policies</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Category</th>
+              <th>Applied Sites</th>
+              <th>Updated</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="policyListBody"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Billing & Sandbox Licensing</h2>
+        <form id="billingForm" class="form">
+          <select id="billingSiteSelect" name="site_id" required></select>
+          <input name="plugin_id" placeholder="plugin id (optional override)" />
+          <input name="plan_code" placeholder="plan code" value="sandbox_monthly" />
+          <select name="status" required>
+            <option value="active">active</option>
+            <option value="trialing">trialing</option>
+            <option value="past_due">past_due</option>
+            <option value="unpaid">unpaid</option>
+            <option value="canceled">canceled</option>
+          </select>
+          <label>
+            <input name="sandbox_enabled" type="checkbox" checked />
+            Sandbox enabled
+          </label>
+          <input name="current_period_end" type="datetime-local" />
+          <input name="grace_period_end" type="datetime-local" />
+          <button type="submit">Save + Sync</button>
+        </form>
+        <div class="inline-controls">
+          <select id="billingStatusFilter">
+            <option value="">All statuses</option>
+            <option value="active">active</option>
+            <option value="trialing">trialing</option>
+            <option value="past_due">past_due</option>
+            <option value="unpaid">unpaid</option>
+            <option value="canceled">canceled</option>
+          </select>
+          <button id="loadBillingBtn" type="button">Load Billing</button>
+          <button id="openPortalBtn" type="button" class="secondary">Open Customer Portal</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Site</th>
+              <th>Domain</th>
+              <th>Status</th>
+              <th>Sandbox</th>
+              <th>Access</th>
+              <th>Plan</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="billingListBody"></tbody>
+        </table>
+        <h3>Stripe Billing History</h3>
+        <div class="inline-controls">
+          <button id="loadBillingHistoryBtn" type="button">Load Billing History</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Site</th>
+              <th>Domain</th>
+              <th>Status</th>
+              <th>Plan</th>
+              <th>Customer</th>
+              <th>Subscription</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody id="billingHistoryBody"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Lead Inbox</h2>
+        <div class="inline-controls">
+          <input id="leadSourceFilter" placeholder="filter source" />
+          <button id="loadLeadsBtn" type="button">Load Leads</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Email</th>
+              <th>Source</th>
+              <th>Product</th>
+              <th>Plan</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody id="leadListBody"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Stripe Webhook Events</h2>
+        <div class="inline-controls">
+          <select id="webhookEventStatusFilter">
+            <option value="">All</option>
+            <option value="processed">processed</option>
+            <option value="failed">failed</option>
+          </select>
+          <button id="loadWebhookEventsBtn" type="button">Load Webhook Events</button>
+          <button id="exportWebhookEventsBtn" type="button" class="secondary">Export CSV</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Event ID</th>
+              <th>Type</th>
+              <th>Status</th>
+              <th>Site</th>
+              <th>Error</th>
+              <th>Processed</th>
+            </tr>
+          </thead>
+          <tbody id="webhookEventListBody"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <dialog id="payloadDialog" class="payload-dialog">
+      <div class="payload-dialog-header">
+        <h2>Webhook Payload</h2>
+        <button id="closePayloadDialogBtn" type="button" class="secondary">Close</button>
+      </div>
+      <pre id="payloadDialogBody" class="payload-dialog-body"></pre>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

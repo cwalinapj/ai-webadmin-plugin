@@ -4,14 +4,33 @@ Initial backend scaffold for a custom VPS control panel operated through a chat-
 
 ## What is implemented
 - HTTP API server with health, site registration, chat planning, and action execution routes.
+- Public SaaS-style landing experience at `/` with dedicated product URLs for each plugin.
+- Public pricing route at `/pricing` with lead/demo capture wired into backend storage.
+- Stripe Checkout session creation and webhook-driven billing state sync.
+- Secure operator console at `/console`.
+- Cookie-based console session login in addition to API token auth.
 - Chat-agent planner that converts operator prompts into structured operations.
 - Safe command executor with allowlisted services and confirmation gating.
 - Dry-run-first execution mode for risky operations.
 - Persistent API-key/PAT management with hashed-at-rest secrets, audit trails, revoke/rotate endpoints, and auto-rotation support.
 - Supports `switch_load_balancer_mode` action mapped to `/root/watchdog-heartbeat.sh` with strict args validation.
+- Fleet mode: multi-site risk dashboard, policy templates, and bulk policy apply across sites.
+- Billing mode: per-site monthly sandbox subscription state with sync to worker enforcement.
 
 ## API routes
 - `GET /health`
+- `GET /api/pricing/plans`
+- `GET /api/billing/public-status`
+- `POST /api/leads`
+- `GET /api/leads`
+- `POST /api/billing/checkout-session`
+- `GET /api/billing/history`
+- `GET /api/billing/webhook-events`
+- `POST /api/billing/customer-portal-session`
+- `POST /api/stripe/webhook`
+- `POST /api/session/login`
+- `POST /api/session/logout`
+- `GET /api/session/me`
 - `GET /api/auth/me`
 - `GET /api/tokens`
 - `POST /api/tokens`
@@ -21,6 +40,12 @@ Initial backend scaffold for a custom VPS control panel operated through a chat-
 - `POST /api/tokens/:id/rotate`
 - `GET /api/sites`
 - `POST /api/sites`
+- `GET /api/billing/subscriptions`
+- `POST /api/billing/subscriptions`
+- `GET /api/fleet/risk`
+- `GET /api/fleet/policies`
+- `POST /api/fleet/policies`
+- `POST /api/fleet/policies/:id/apply`
 - `POST /api/chat/message`
 - `POST /api/agent/execute`
 
@@ -64,7 +89,11 @@ export PANEL_WORKER_SHARED_SECRET="..."
 export PANEL_WORKER_CAP_UPTIME="..."
 export PANEL_WORKER_CAP_SANDBOX="..."
 export PANEL_WORKER_PLUGIN_PREFIX="ai-vps-panel"
+export PANEL_WORKER_BILLING_INTERNAL_TOKEN="..."
 ```
+
+Billing sync target in worker:
+- `POST /internal/billing/subscription/upsert` (Bearer token = `PANEL_WORKER_BILLING_INTERNAL_TOKEN`)
 
 ## Local run
 ```bash
@@ -80,6 +109,73 @@ npm run build
 npm start
 ```
 Open [http://localhost:8080](http://localhost:8080) for the web UI.
+Public landing routes:
+- `/`
+- `/pricing`
+- `/ai-addwords-meta`
+- `/seo-traffic`
+- `/ai-webadmin`
+- `/cache-ops`
+- `/hosting-ops`
+- `/sitebuilder`
+- `/tolldns`
+- `/ai-vps-control-panel`
+- `/console`
+
+Console session env vars:
+```bash
+export AI_VPS_CONSOLE_EMAIL="owner@loccount.local"
+export AI_VPS_CONSOLE_PASSWORD="replace-this"
+export AI_VPS_CONSOLE_ROLE="admin"
+export AI_VPS_CONSOLE_TENANT="*"
+```
+
+Stripe billing env vars:
+```bash
+export STRIPE_SECRET_KEY="sk_live_..."
+export STRIPE_WEBHOOK_SECRET="whsec_..."
+export STRIPE_SUCCESS_URL="https://loccount.com/pricing?checkout=success"
+export STRIPE_CANCEL_URL="https://loccount.com/pricing?checkout=cancel"
+export STRIPE_PORTAL_RETURN_URL="https://loccount.com/console?billing=portal"
+export STRIPE_PRICE_STARTER="price_..."
+export STRIPE_PRICE_GROWTH="price_..."
+export STRIPE_PRICE_CONTROL_PLANE="price_..."
+```
+
+Bootstrap helper:
+```bash
+sudo STRIPE_SECRET_KEY="sk_live_..." PANEL_BASE_URL="https://loccount.com" \
+  /Users/root1/loc-count/_repos/ai-webadmin-plugin/scripts/setup-stripe-billing.sh
+```
+
+Webhook note:
+- Point your Stripe webhook endpoint at `/api/stripe/webhook`.
+- Send at minimum:
+  - `checkout.session.completed`
+  - `customer.subscription.updated`
+  - `customer.subscription.deleted`
+- Subscription metadata should carry `tenant_id`, `site_id`, `plan_code`, and `plugin_id` so the panel can persist billing state and sync worker enforcement.
+- Customer Portal is exposed through `POST /api/billing/customer-portal-session` and uses the latest known Stripe customer for the selected site.
+- Stripe webhook replay protection is persisted in the local database by `stripe_event_id`, so duplicate deliveries are accepted once and ignored thereafter.
+- Stripe webhook events now retain payload JSON plus failure status/error text for debugging and retry verification.
+
+UI notes:
+- `/pricing?site_id=<site-id>` shows a public billing-status badge for that site.
+- `/console` shows a billing badge for the currently selected billing site.
+- `/console` also exposes a Stripe webhook event table with processed/failed filtering. Hover a row to inspect the retained payload.
+
+Webhook testing helper:
+```bash
+/Users/root1/loc-count/_repos/ai-webadmin-plugin/scripts/test-stripe-webhook.sh listen
+/Users/root1/loc-count/_repos/ai-webadmin-plugin/scripts/test-stripe-webhook.sh trigger customer.subscription.updated
+/Users/root1/loc-count/_repos/ai-webadmin-plugin/scripts/test-stripe-webhook.sh resend evt_123
+```
+
+## Monthly sandbox licensing (deactivate on non-payment)
+- Use the **Billing & Sandbox Licensing** panel.
+- Set `status` to `unpaid` or `canceled`, and/or uncheck `Sandbox enabled`.
+- Click `Save + Sync` to persist locally and push to worker.
+- Worker sandbox routes will return `402 sandbox_subscription_inactive` for blocked sites.
 
 ### Optional: Vault transit backend
 ```bash

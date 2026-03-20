@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LocCount Product</title>
+    <meta name="description" content="LocCount AI product page" />
+    <link rel="stylesheet" href="/marketing.css" />
+  </head>
+  <body data-page="product">
+    <div class="marketing-shell">
+      <header class="product-hero">
+        <nav class="nav">
+          <a class="brand" href="/">LocCount</a>
+          <div class="nav-links">
+            <a href="/">Suite</a>
+            <a href="/console">Console</a>
+          </div>
+        </nav>
+
+        <section class="product-frame">
+          <p class="eyebrow" id="productCategory"></p>
+          <h1 id="productTitle"></h1>
+          <p class="lede" id="productPitch"></p>
+          <div class="hero-actions">
+            <a class="button primary" href="/pricing">See Pricing</a>
+            <a class="button secondary" href="/">Back to Suite</a>
+          </div>
+        </section>
+      </header>
+
+      <main>
+        <section class="section">
+          <div class="section-heading">
+            <p class="eyebrow">Positioning</p>
+            <h2 id="productHeadline"></h2>
+          </div>
+          <div class="detail-grid">
+            <article class="detail-card">
+              <h3>Outcome</h3>
+              <p id="productOutcome"></p>
+            </article>
+            <article class="detail-card">
+              <h3>Best Fit</h3>
+              <p id="productAudience"></p>
+            </article>
+            <article class="detail-card">
+              <h3>Advantage</h3>
+              <p id="productAdvantage"></p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-heading">
+            <p class="eyebrow">Core Capabilities</p>
+            <h2>What this product does.</h2>
+          </div>
+          <div class="capability-list" id="capabilityList"></div>
+        </section>
+
+        <section class="section launch-section">
+          <div class="launch-copy">
+            <p class="eyebrow">Product URL</p>
+            <h2 id="productUrlHeading"></h2>
+            <p>This page gives each plugin a clean public destination while the secure operator workflow stays inside the control panel.</p>
+          </div>
+          <div class="launch-panel">
+            <p class="panel-label">Direct path</p>
+            <p class="single-url" id="productUrlPath"></p>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-heading">
+            <p class="eyebrow">Request Access</p>
+            <h2>Turn interest into a qualified lead.</h2>
+          </div>
+          <form id="productLeadForm" class="lead-form">
+            <input name="name" placeholder="Your name" required />
+            <input name="email" type="email" placeholder="Work email" required />
+            <input name="company" placeholder="Company" />
+            <input name="product_slug" id="productSlugInput" type="hidden" />
+            <textarea name="message" rows="4" placeholder="What would you want this product to run for you?"></textarea>
+            <button class="button primary" type="submit">Request Access</button>
+            <p id="productLeadState" class="form-state"></p>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/marketing.js"></script>
+  </body>
+</html>

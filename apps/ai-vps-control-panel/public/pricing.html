@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pricing | LocCount</title>
+    <meta name="description" content="Pricing for the LocCount AI growth and control-plane stack." />
+    <link rel="stylesheet" href="/marketing.css" />
+  </head>
+  <body data-page="pricing">
+    <div class="marketing-shell">
+      <header class="product-hero">
+        <nav class="nav">
+          <a class="brand" href="/">LocCount</a>
+          <div class="nav-links">
+            <a href="/">Suite</a>
+            <a href="/console">Console</a>
+          </div>
+        </nav>
+
+        <section class="product-frame">
+          <p class="eyebrow">Pricing</p>
+          <h1>Pick the operating model that matches your fleet.</h1>
+          <p class="lede">
+            Pricing is now part of the public product flow. Buyers can choose a plan and send a qualified request directly into the console lead inbox.
+          </p>
+          <div id="publicBillingBadge" class="billing-badge billing-badge-neutral">Billing status unavailable</div>
+        </section>
+      </header>
+
+      <main>
+        <section class="section">
+          <div class="section-heading">
+            <p class="eyebrow">Plans</p>
+            <h2>Commercial packaging for the suite.</h2>
+          </div>
+          <div id="pricingGrid" class="product-grid"></div>
+        </section>
+
+        <section class="section">
+          <div class="section-heading">
+            <p class="eyebrow">Start</p>
+            <h2>Start checkout or request onboarding.</h2>
+          </div>
+          <form id="pricingLeadForm" class="lead-form">
+            <input name="name" placeholder="Your name" required />
+            <input name="email" type="email" placeholder="Work email" required />
+            <input name="company" placeholder="Company" />
+            <select name="plan_code" id="pricingPlanSelect" required></select>
+            <select name="product_slug">
+              <option value="ai-vps-control-panel">AI VPS Control Panel</option>
+              <option value="ai-addwords-meta">AI AddWords Meta</option>
+              <option value="seo-traffic">SEO Traffic</option>
+              <option value="ai-webadmin">AI WebAdmin</option>
+              <option value="cache-ops">Cache Ops</option>
+              <option value="hosting-ops">Hosting Ops</option>
+              <option value="sitebuilder">Sitebuilder 1.0</option>
+              <option value="tolldns">TollDNS</option>
+            </select>
+            <textarea name="message" rows="4" placeholder="What outcome are you buying for?"></textarea>
+            <div class="hero-actions">
+              <button class="button primary" type="submit">Start Stripe Checkout</button>
+              <button class="button secondary" id="pricingLeadOnlyBtn" type="button">Request Sales Walkthrough</button>
+            </div>
+            <p id="pricingLeadState" class="form-state"></p>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/marketing.js"></script>
+  </body>
+</html>

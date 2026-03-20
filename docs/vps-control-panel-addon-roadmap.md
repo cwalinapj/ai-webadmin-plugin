@@ -49,6 +49,8 @@ Keep one shared control plane and one signed agent contract, then ship thin adap
   - `apps/panel-addon-core` (signed client + heartbeat CLI)
   - `apps/ai-vps-control-panel` (chat-agent backend + guarded command executor)
   - API key auth + tenant RBAC + worker telemetry sync wiring in control-panel backend
+  - persistent API key/PAT lifecycle routes (create/list/revoke/rotate/auto-rotate) with hash-at-rest token storage and audit trails
+  - optional HashiCorp Vault Transit secret backend for token hashing/verification
   - SQLite persistence and first web UI shell (inventory/chat/queue/audit)
 
 ### Phase 2: Panel addon bootstrap

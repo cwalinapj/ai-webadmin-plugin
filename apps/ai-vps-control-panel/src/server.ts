@@ -1,10 +1,12 @@
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { planAgentResponse } from './agent/planner.js';
 import { authenticate, isAllowed } from './auth/apiKeys.js';
 import { defaultRotateAfterIso, issueTokenSecret, rotateStoredToken } from './auth/tokenLifecycle.js';
 import { SafeCommandExecutor } from './commands/executor.js';
+import { defaultPluginIdForSite, syncBillingSubscriptionToWorker } from './integration/workerBillingSync.js';
 import { syncWorkerAfterAction } from './integration/workerSync.js';
 import { createStore } from './store/index.js';
 import type {
@@ -12,10 +14,12 @@ import type {
   AgentAction,
   ApiPrincipal,
   AuthTokenRecord,
+  BillingStatus,
   ChatRequest,
   ExecuteActionRequest,
   QueuedActionRecord,
   Role,
+  SitePolicyBindingRecord,
   SiteRecord,
   TokenType,
 } from './types.js';
@@ -31,8 +35,77 @@ interface RequestContext {
 }
 
 const PUBLIC_DIR = path.resolve(process.cwd(), 'public');
+const CONSOLE_SESSION_COOKIE = 'ai_vps_console_session';
 
 const executor = new SafeCommandExecutor();
+
+function sessionDurationMs(): number {
+  const parsed = Number.parseInt(process.env.AI_VPS_CONSOLE_SESSION_HOURS ?? '168', 10);
+  if (Number.isFinite(parsed) && parsed > 0 && parsed <= 24 * 90) {
+    return parsed * 60 * 60 * 1000;
+  }
+  return 7 * 24 * 60 * 60 * 1000;
+}
+
+function getConsoleCredentials(): { email: string; password: string; role: Role; tenant_id: string } | null {
+  const email = process.env.AI_VPS_CONSOLE_EMAIL?.trim() || 'owner@loccount.local';
+  const password = process.env.AI_VPS_CONSOLE_PASSWORD?.trim() || '';
+  if (password === '') {
+    return null;
+  }
+  const role = parseRole(process.env.AI_VPS_CONSOLE_ROLE?.trim() || 'admin');
+  const tenantId = process.env.AI_VPS_CONSOLE_TENANT?.trim() || '*';
+  return { email, password, role, tenant_id: tenantId };
+}
+
+function secureCompare(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) {
+    return false;
+  }
+  return timingSafeEqual(left, right);
+}
+
+function parseCookies(req: http.IncomingMessage): Map<string, string> {
+  const header = req.headers.cookie;
+  const cookies = new Map<string, string>();
+  if (typeof header !== 'string' || header.trim() === '') {
+    return cookies;
+  }
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=');
+    if (index <= 0) {
+      continue;
+    }
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (key !== '') {
+      cookies.set(key, decodeURIComponent(value));
+    }
+  }
+  return cookies;
+}
+
+function sessionCookieValue(sessionId: string, maxAgeSeconds: number): string {
+  return `${CONSOLE_SESSION_COOKIE}=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
+}
+
+function expiredSessionCookieValue(): string {
+  return `${CONSOLE_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+function sessionPrincipalFromRecord(session: { id: string; role: Role; tenant_id: string; email: string }): ApiPrincipal {
+  return {
+    type: 'session',
+    token_id: session.id,
+    token_type: null,
+    token: `session:${session.email}`,
+    role: session.role,
+    tenant_id: session.tenant_id,
+    scopes: ['*'],
+  };
+}
 
 function json(status: number, body: unknown, headers?: Record<string, string>): JsonResponse {
   return { status, body, headers };
@@ -57,15 +130,19 @@ function sendRaw(
 }
 
 async function parseJson(req: http.IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  const raw = Buffer.concat(chunks).toString('utf8');
+  const raw = await readRawBody(req);
   if (raw.trim() === '') {
     return {};
   }
   return JSON.parse(raw);
+}
+
+async function readRawBody(req: http.IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -90,13 +167,24 @@ function siteAllowed(principal: ApiPrincipal, site: SiteRecord): boolean {
   return principal.tenant_id === '*' || site.tenant_id === principal.tenant_id;
 }
 
-function authorize(
+async function authorize(
   req: http.IncomingMessage,
   store: ReturnType<typeof createStore>,
   role: Role,
   context: RequestContext,
-): ApiPrincipal | null {
-  const principal = authenticate(req, store);
+): Promise<ApiPrincipal | null> {
+  let principal = await authenticate(req, store);
+  if (!principal) {
+    const sessionId = parseCookies(req).get(CONSOLE_SESSION_COOKIE) ?? '';
+    if (sessionId !== '') {
+      const session = store.getConsoleSession(sessionId);
+      const now = Date.now();
+      if (session && !session.revoked_at && Date.parse(session.expires_at) > now) {
+        store.touchConsoleSession(session.id);
+        principal = sessionPrincipalFromRecord(session);
+      }
+    }
+  }
   if (!principal) {
     return null;
   }
@@ -130,18 +218,51 @@ function contentTypeForFile(filePath: string): string {
   return 'text/html; charset=utf-8';
 }
 
+function staticRouteToFile(pathname: string): string | null {
+  const normalized = pathname.trim();
+  if (normalized === '/' || normalized === '') {
+    return '/index.html';
+  }
+  if (normalized === '/console') {
+    return '/console.html';
+  }
+  if (normalized === '/pricing') {
+    return '/pricing.html';
+  }
+
+  const productRoutes = new Set([
+    '/ai-addwords-meta',
+    '/seo-traffic',
+    '/ai-webadmin',
+    '/cache-ops',
+    '/hosting-ops',
+    '/sitebuilder',
+    '/tolldns',
+    '/ai-vps-control-panel',
+  ]);
+
+  if (productRoutes.has(normalized)) {
+    return '/product.html';
+  }
+
+  if (['.html', '.js', '.css'].some((ext) => normalized.endsWith(ext))) {
+    return normalized;
+  }
+
+  return null;
+}
+
 async function serveStatic(pathname: string): Promise<{ status: number; contentType: string; body: Buffer } | null> {
-  const normalized = pathname === '/' ? '/index.html' : pathname;
+  const normalized = staticRouteToFile(pathname);
+  if (!normalized) {
+    return null;
+  }
   if (normalized.includes('..')) {
     return {
       status: 400,
       contentType: 'text/plain; charset=utf-8',
       body: Buffer.from('bad_request'),
     };
-  }
-
-  if (!['.html', '.js', '.css'].some((ext) => normalized.endsWith(ext))) {
-    return null;
   }
 
   const filePath = path.resolve(PUBLIC_DIR, `.${normalized}`);
@@ -223,6 +344,160 @@ function parsePositiveInt(value: unknown): number | null {
   return rounded;
 }
 
+function parseNonNegativeInt(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const rounded = Math.floor(value);
+  if (rounded < 0) {
+    return null;
+  }
+  return rounded;
+}
+
+function parseBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return true;
+    }
+    if (value === 0) {
+      return false;
+    }
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on') {
+      return true;
+    }
+    if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+function parseBillingStatus(value: unknown): BillingStatus | null {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (
+    normalized === 'active' ||
+    normalized === 'trialing' ||
+    normalized === 'past_due' ||
+    normalized === 'canceled' ||
+    normalized === 'unpaid'
+  ) {
+    return normalized;
+  }
+  return null;
+}
+
+function isFutureIso(value: string | null): boolean {
+  if (!value || value.trim() === '') {
+    return false;
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return false;
+  }
+  return parsed >= Date.now();
+}
+
+function isSandboxAllowedBySubscription(input: {
+  status: BillingStatus;
+  sandbox_enabled: boolean;
+  grace_period_end: string | null;
+}): boolean {
+  if (!input.sandbox_enabled) {
+    return false;
+  }
+  if (input.status === 'active' || input.status === 'trialing') {
+    return true;
+  }
+  if (input.status === 'past_due' && isFutureIso(input.grace_period_end)) {
+    return true;
+  }
+  return false;
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => item !== '');
+}
+
+function parseJsonObjectValue(value: unknown): Record<string, unknown> {
+  if (!isObject(value)) {
+    return {};
+  }
+  return value;
+}
+
+function riskLevelFromScore(score: number): 'low' | 'medium' | 'high' {
+  if (score >= 7) {
+    return 'high';
+  }
+  if (score >= 3.5) {
+    return 'medium';
+  }
+  return 'low';
+}
+
+function isRecentIso(isoValue: string, cutoffMs: number): boolean {
+  const parsed = Date.parse(isoValue);
+  if (!Number.isFinite(parsed)) {
+    return false;
+  }
+  return parsed >= cutoffMs;
+}
+
+function scoreSiteRisk(input: {
+  site: SiteRecord;
+  actions: QueuedActionRecord[];
+  bindings: SitePolicyBindingRecord[];
+  cutoffMs: number;
+}): {
+  site_id: string;
+  domain: string;
+  risk_score: number;
+  risk_level: 'low' | 'medium' | 'high';
+  pending_actions: number;
+  pending_high_risk_actions: number;
+  failed_actions_window: number;
+  policy_templates: string[];
+} {
+  const pendingActions = input.actions.filter((item) => item.status === 'pending' || item.status === 'approved');
+  const pendingHighRiskActions = pendingActions.filter((item) => item.risk === 'high');
+  const failedActionsWindow = input.actions.filter(
+    (item) => item.status === 'failed' && isRecentIso(item.created_at, input.cutoffMs),
+  );
+
+  const policyTemplates = Array.from(new Set(input.bindings.map((item) => item.template_name).filter(Boolean)));
+  const policyCoverageBoost = policyTemplates.length > 0 ? 0.5 : 0;
+
+  const rawScore =
+    pendingActions.length * 0.6 +
+    pendingHighRiskActions.length * 1.8 +
+    failedActionsWindow.length * 2.1 -
+    policyCoverageBoost;
+  const riskScore = Number(Math.max(0, Math.min(10, rawScore)).toFixed(2));
+
+  return {
+    site_id: input.site.id,
+    domain: input.site.domain,
+    risk_score: riskScore,
+    risk_level: riskLevelFromScore(riskScore),
+    pending_actions: pendingActions.length,
+    pending_high_risk_actions: pendingHighRiskActions.length,
+    failed_actions_window: failedActionsWindow.length,
+    policy_templates: policyTemplates,
+  };
+}
+
 function resolveTenantScope(principal: ApiPrincipal, tenantInput: unknown): string | null {
   const requested = typeof tenantInput === 'string' ? tenantInput.trim() : '';
   if (principal.tenant_id !== '*') {
@@ -256,6 +531,150 @@ function publicTokenRecord(record: AuthTokenRecord): Omit<AuthTokenRecord, 'toke
   };
 }
 
+function isEmailLike(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function billingStatusFromStripeSubscription(value: string): BillingStatus {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'trialing') {
+    return 'trialing';
+  }
+  if (normalized === 'past_due') {
+    return 'past_due';
+  }
+  if (normalized === 'canceled' || normalized === 'incomplete_expired' || normalized === 'unpaid') {
+    return 'canceled';
+  }
+  return 'active';
+}
+
+function pricingPlans(): Array<{
+  code: string;
+  name: string;
+  monthly_price_usd: number;
+  audience: string;
+  summary: string;
+  cta: string;
+}> {
+  return [
+    {
+      code: 'starter',
+      name: 'Starter',
+      monthly_price_usd: 299,
+      audience: 'Single-site operators and early service businesses.',
+      summary: 'Core console, 1 managed site, billing-aware sandbox, and launch support.',
+      cta: 'Book a guided setup',
+    },
+    {
+      code: 'growth',
+      name: 'Growth',
+      monthly_price_usd: 999,
+      audience: 'Agencies and operators managing several revenue sites.',
+      summary: 'Multi-site control, growth stack positioning, and faster operational rollout.',
+      cta: 'Request a product walkthrough',
+    },
+    {
+      code: 'control-plane',
+      name: 'Control Plane',
+      monthly_price_usd: 2499,
+      audience: 'Teams standardizing operations across VPS fleets.',
+      summary: 'Full control-plane model with Vault workflows, policy templates, and tenant operations.',
+      cta: 'Talk to sales',
+    },
+  ];
+}
+
+function billingBadgeTone(status: BillingStatus): 'good' | 'warn' | 'bad' | 'neutral' {
+  if (status === 'active' || status === 'trialing') {
+    return 'good';
+  }
+  if (status === 'past_due') {
+    return 'warn';
+  }
+  if (status === 'canceled' || status === 'unpaid') {
+    return 'bad';
+  }
+  return 'neutral';
+}
+
+function stripeConfig():
+  | {
+      secretKey: string;
+      webhookSecret: string;
+      prices: Record<string, string>;
+      successUrl: string;
+      cancelUrl: string;
+      portalReturnUrl: string;
+    }
+  | null {
+  const secretKey = process.env.STRIPE_SECRET_KEY?.trim() || '';
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim() || '';
+  const successUrl = process.env.STRIPE_SUCCESS_URL?.trim() || 'http://localhost:8080/pricing?checkout=success';
+  const cancelUrl = process.env.STRIPE_CANCEL_URL?.trim() || 'http://localhost:8080/pricing?checkout=cancel';
+  const portalReturnUrl = process.env.STRIPE_PORTAL_RETURN_URL?.trim() || 'http://localhost:8080/console?billing=portal';
+  const prices: Record<string, string> = {};
+  for (const plan of pricingPlans()) {
+    const key = `STRIPE_PRICE_${plan.code.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
+    const priceId = process.env[key]?.trim() || '';
+    if (priceId !== '') {
+      prices[plan.code] = priceId;
+    }
+  }
+  if (secretKey === '' || webhookSecret === '') {
+    return null;
+  }
+  return { secretKey, webhookSecret, prices, successUrl, cancelUrl, portalReturnUrl };
+}
+
+function formEncoded(data: Record<string, string>): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(data)) {
+    params.append(key, value);
+  }
+  return params;
+}
+
+function parseStripeSignature(header: string): { timestamp: string; signatures: string[] } | null {
+  const parts = header.split(',').map((item) => item.trim());
+  let timestamp = '';
+  const signatures: string[] = [];
+  for (const part of parts) {
+    const [key, value] = part.split('=', 2);
+    if (key === 't') {
+      timestamp = value ?? '';
+    }
+    if (key === 'v1' && value) {
+      signatures.push(value);
+    }
+  }
+  if (timestamp === '' || signatures.length === 0) {
+    return null;
+  }
+  return { timestamp, signatures };
+}
+
+function verifyStripeWebhookSignature(rawBody: string, signatureHeader: string, webhookSecret: string): boolean {
+  const parsed = parseStripeSignature(signatureHeader);
+  if (!parsed) {
+    return false;
+  }
+  const timestampMs = Number.parseInt(parsed.timestamp, 10) * 1000;
+  if (!Number.isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > 5 * 60 * 1000) {
+    return false;
+  }
+  const payload = `${parsed.timestamp}.${rawBody}`;
+  const expected = createHmac('sha256', webhookSecret).update(payload).digest('hex');
+  const expectedBuf = Buffer.from(expected);
+  for (const signature of parsed.signatures) {
+    const candidateBuf = Buffer.from(signature);
+    if (candidateBuf.length === expectedBuf.length && timingSafeEqual(candidateBuf, expectedBuf)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function route(
   req: http.IncomingMessage,
   store: ReturnType<typeof createStore>,
@@ -269,8 +688,608 @@ async function route(
     return json(200, { ok: true, service: 'ai-vps-control-panel' });
   }
 
+  if (method === 'GET' && pathname === '/api/pricing/plans') {
+    return json(200, { ok: true, plans: pricingPlans() });
+  }
+
+  if (method === 'GET' && pathname === '/api/billing/public-status') {
+    const siteId = url.searchParams.get('site_id')?.trim() || '';
+    if (siteId === '') {
+      return json(400, { ok: false, error: 'missing_site_id' });
+    }
+    const site = store.getSite(siteId);
+    if (!site) {
+      return json(404, { ok: false, error: 'site_not_found' });
+    }
+    const subscriptions = store.listBillingSubscriptions({
+      tenant_id: site.tenant_id,
+      limit: 500,
+    });
+    const subscription = subscriptions.find((item) => item.site_id === site.id);
+    if (!subscription) {
+      return json(404, { ok: false, error: 'billing_status_not_found' });
+    }
+    return json(200, {
+      ok: true,
+      billing: {
+        site_id: site.id,
+        domain: site.domain,
+        plan_code: subscription.plan_code,
+        status: subscription.status,
+        sandbox_access_allowed: isSandboxAllowedBySubscription({
+          status: subscription.status,
+          sandbox_enabled: subscription.sandbox_enabled,
+          grace_period_end: subscription.grace_period_end,
+        }),
+        badge_tone: billingBadgeTone(subscription.status),
+        updated_at: subscription.updated_at,
+      },
+    });
+  }
+
+  if (method === 'POST' && pathname === '/api/leads') {
+    const parsed = await parseObjectBody(req);
+    if (!parsed.ok) {
+      return json(400, { ok: false, error: parsed.error });
+    }
+    const body = parsed.body;
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    if (name === '' || email === '' || !isEmailLike(email)) {
+      return json(400, { ok: false, error: 'missing_name_or_valid_email' });
+    }
+    const lead = store.createLeadCapture({
+      name,
+      email,
+      company: typeof body.company === 'string' ? body.company.trim() : null,
+      source: typeof body.source === 'string' && body.source.trim() !== '' ? body.source.trim() : 'website',
+      product_slug: typeof body.product_slug === 'string' ? body.product_slug.trim() : null,
+      plan_code: typeof body.plan_code === 'string' ? body.plan_code.trim() : null,
+      message: typeof body.message === 'string' ? body.message.trim() : null,
+      status: 'new',
+    });
+    store.addAuditLog({
+      tenant_id: '*',
+      site_id: null,
+      actor: `lead:${lead.email}`,
+      event_type: 'lead.captured',
+      payload: {
+        lead_id: lead.id,
+        source: lead.source,
+        product_slug: lead.product_slug,
+        plan_code: lead.plan_code,
+      },
+    });
+    return json(201, { ok: true, lead });
+  }
+
+  if (method === 'POST' && pathname === '/api/billing/checkout-session') {
+    const parsed = await parseObjectBody(req);
+    if (!parsed.ok) {
+      return json(400, { ok: false, error: parsed.error });
+    }
+    const config = stripeConfig();
+    if (!config) {
+      return json(503, { ok: false, error: 'stripe_not_configured' });
+    }
+    const body = parsed.body;
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const planCode = typeof body.plan_code === 'string' ? body.plan_code.trim() : '';
+    if (name === '' || email === '' || !isEmailLike(email) || planCode === '') {
+      return json(400, { ok: false, error: 'missing_checkout_fields' });
+    }
+    const priceId = config.prices[planCode];
+    if (!priceId) {
+      return json(400, { ok: false, error: 'unknown_or_unpriced_plan' });
+    }
+    const tenantId = typeof body.tenant_id === 'string' && body.tenant_id.trim() !== '' ? body.tenant_id.trim() : 'default';
+    const siteId = typeof body.site_id === 'string' && body.site_id.trim() !== '' ? body.site_id.trim() : null;
+    if (siteId) {
+      const site = store.getSite(siteId);
+      if (!site) {
+        return json(404, { ok: false, error: 'site_not_found' });
+      }
+    }
+    const productSlug = typeof body.product_slug === 'string' && body.product_slug.trim() !== '' ? body.product_slug.trim() : 'ai-vps-control-panel';
+    const company = typeof body.company === 'string' ? body.company.trim() : null;
+    const message = typeof body.message === 'string' ? body.message.trim() : null;
+    const lead = store.createLeadCapture({
+      name,
+      email,
+      company,
+      source: typeof body.source === 'string' && body.source.trim() !== '' ? body.source.trim() : 'stripe_checkout',
+      product_slug: productSlug,
+      plan_code: planCode,
+      message,
+      status: 'new',
+    });
+    const order = store.createStripeCheckoutOrder({
+      tenant_id: tenantId,
+      site_id: siteId,
+      lead_id: lead.id,
+      product_slug: productSlug,
+      plan_code: planCode,
+      status: 'created',
+    });
+    const pluginId = siteId ? defaultPluginIdForSite(siteId) : '';
+    const params = formEncoded({
+      mode: 'subscription',
+      success_url: config.successUrl,
+      cancel_url: config.cancelUrl,
+      customer_email: email,
+      client_reference_id: order.id,
+      'line_items[0][price]': priceId,
+      'line_items[0][quantity]': '1',
+      'metadata[order_id]': order.id,
+      'metadata[lead_id]': lead.id,
+      'metadata[tenant_id]': tenantId,
+      'metadata[site_id]': siteId ?? '',
+      'metadata[plan_code]': planCode,
+      'metadata[product_slug]': productSlug,
+      'metadata[plugin_id]': pluginId,
+      'subscription_data[metadata][order_id]': order.id,
+      'subscription_data[metadata][lead_id]': lead.id,
+      'subscription_data[metadata][tenant_id]': tenantId,
+      'subscription_data[metadata][site_id]': siteId ?? '',
+      'subscription_data[metadata][plan_code]': planCode,
+      'subscription_data[metadata][product_slug]': productSlug,
+      'subscription_data[metadata][plugin_id]': pluginId,
+    });
+    const response = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${config.secretKey}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: params,
+    });
+    const text = await response.text();
+    let stripeBody: Record<string, unknown> = {};
+    try {
+      stripeBody = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      stripeBody = { raw: text };
+    }
+    if (!response.ok) {
+      return json(400, { ok: false, error: 'stripe_checkout_session_failed', details: stripeBody });
+    }
+    const checkoutOrder = store.updateStripeCheckoutOrder(order.id, {
+      stripe_checkout_session_id:
+        typeof stripeBody.id === 'string' ? stripeBody.id : null,
+      checkout_url: typeof stripeBody.url === 'string' ? stripeBody.url : null,
+      status: 'checkout_created',
+    });
+    store.addAuditLog({
+      tenant_id: tenantId,
+      site_id: siteId,
+      actor: `checkout:${email}`,
+      event_type: 'billing.checkout.session_created',
+      payload: {
+        order_id: order.id,
+        lead_id: lead.id,
+        plan_code: planCode,
+        stripe_checkout_session_id: checkoutOrder?.stripe_checkout_session_id ?? null,
+      },
+    });
+    return json(201, {
+      ok: true,
+      order: checkoutOrder,
+      checkout_url: checkoutOrder?.checkout_url ?? null,
+    });
+  }
+
+  if (method === 'GET' && pathname === '/api/billing/history') {
+    const principal = await authorize(req, store, 'viewer', context);
+    if (!principal) {
+      return json(401, { ok: false, error: 'unauthorized' });
+    }
+    const siteId = url.searchParams.get('site_id')?.trim() || undefined;
+    if (siteId) {
+      const site = store.getSite(siteId);
+      if (!site) {
+        return json(404, { ok: false, error: 'site_not_found' });
+      }
+      if (!siteAllowed(principal, site)) {
+        return json(403, { ok: false, error: 'tenant_scope_violation' });
+      }
+    }
+    const status = url.searchParams.get('status')?.trim() || undefined;
+    const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '100', 10);
+    const orders = store.listStripeCheckoutOrders({
+      tenant_id: principal.tenant_id,
+      site_id: siteId,
+      status,
+      limit: Number.isFinite(limitRaw) ? limitRaw : 100,
+    });
+    const visibleTenant = principal.tenant_id;
+    const siteIds = Array.from(new Set(orders.map((item) => item.site_id).filter((item): item is string => Boolean(item))));
+    const domainBySiteId = new Map<string, string>();
+    for (const orderSiteId of siteIds) {
+      const site = store.getSite(orderSiteId);
+      if (site && (visibleTenant === '*' || site.tenant_id === visibleTenant)) {
+        domainBySiteId.set(site.id, site.domain);
+      }
+    }
+    return json(200, {
+      ok: true,
+      orders: orders.map((item) => ({
+        ...item,
+        domain: item.site_id ? domainBySiteId.get(item.site_id) ?? null : null,
+      })),
+    });
+  }
+
+  if (method === 'GET' && pathname === '/api/billing/webhook-events') {
+    const principal = await authorize(req, store, 'viewer', context);
+    if (!principal) {
+      return json(401, { ok: false, error: 'unauthorized' });
+    }
+    const siteId = url.searchParams.get('site_id')?.trim() || undefined;
+    if (siteId) {
+      const site = store.getSite(siteId);
+      if (!site) {
+        return json(404, { ok: false, error: 'site_not_found' });
+      }
+      if (!siteAllowed(principal, site)) {
+        return json(403, { ok: false, error: 'tenant_scope_violation' });
+      }
+    }
+    const statusRaw = url.searchParams.get('status')?.trim() || '';
+    const status = statusRaw === 'processed' || statusRaw === 'failed' ? statusRaw : undefined;
+    const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '100', 10);
+    const events = store.listStripeWebhookEvents({
+      tenant_id: principal.tenant_id,
+      site_id: siteId,
+      status,
+      limit: Number.isFinite(limitRaw) ? limitRaw : 100,
+    });
+    return json(200, { ok: true, events });
+  }
+
+  if (method === 'POST' && pathname === '/api/billing/customer-portal-session') {
+    const principal = await authorize(req, store, 'viewer', context);
+    if (!principal) {
+      return json(401, { ok: false, error: 'unauthorized' });
+    }
+    const parsed = await parseObjectBody(req);
+    if (!parsed.ok) {
+      return json(400, { ok: false, error: parsed.error });
+    }
+    const config = stripeConfig();
+    if (!config) {
+      return json(503, { ok: false, error: 'stripe_not_configured' });
+    }
+    const body = parsed.body;
+    const siteId = typeof body.site_id === 'string' ? body.site_id.trim() : '';
+    if (siteId === '') {
+      return json(400, { ok: false, error: 'missing_site_id' });
+    }
+    const site = store.getSite(siteId);
+    if (!site) {
+      return json(404, { ok: false, error: 'site_not_found' });
+    }
+    if (!siteAllowed(principal, site)) {
+      return json(403, { ok: false, error: 'tenant_scope_violation' });
+    }
+    const customerOrder = store
+      .listStripeCheckoutOrders({
+        tenant_id: principal.tenant_id,
+        site_id: site.id,
+        limit: 25,
+      })
+      .find((item) => item.stripe_customer_id);
+    if (!customerOrder?.stripe_customer_id) {
+      return json(404, { ok: false, error: 'billing_customer_not_found' });
+    }
+
+    const response = await fetch('https://api.stripe.com/v1/billing_portal/sessions', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${config.secretKey}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: formEncoded({
+        customer: customerOrder.stripe_customer_id,
+        return_url: config.portalReturnUrl,
+      }),
+    });
+    const text = await response.text();
+    let stripeBody: Record<string, unknown> = {};
+    try {
+      stripeBody = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      stripeBody = { raw: text };
+    }
+    if (!response.ok) {
+      return json(400, { ok: false, error: 'stripe_customer_portal_failed', details: stripeBody });
+    }
+    store.addAuditLog({
+      tenant_id: site.tenant_id,
+      site_id: site.id,
+      actor: principal.token,
+      event_type: 'billing.customer_portal.session_created',
+      payload: {
+        customer_id: customerOrder.stripe_customer_id,
+        portal_url_present: typeof stripeBody.url === 'string',
+      },
+    });
+    return json(201, {
+      ok: true,
+      url: typeof stripeBody.url === 'string' ? stripeBody.url : null,
+      customer_id: customerOrder.stripe_customer_id,
+      site_id: site.id,
+    });
+  }
+
+  if (method === 'POST' && pathname === '/api/stripe/webhook') {
+    const config = stripeConfig();
+    if (!config) {
+      return json(503, { ok: false, error: 'stripe_not_configured' });
+    }
+    const rawBody = await readRawBody(req);
+    const signature = typeof req.headers['stripe-signature'] === 'string' ? req.headers['stripe-signature'] : '';
+    if (!verifyStripeWebhookSignature(rawBody, signature, config.webhookSecret)) {
+      return json(400, { ok: false, error: 'invalid_stripe_signature' });
+    }
+    const event = JSON.parse(rawBody) as {
+      id?: string;
+      type?: string;
+      livemode?: boolean;
+      data?: { object?: Record<string, unknown> };
+    };
+    const eventId = typeof event.id === 'string' ? event.id : '';
+    const eventType = typeof event.type === 'string' ? event.type : '';
+    const object = (event.data?.object ?? {}) as Record<string, unknown>;
+    const eventMetadata = (object.metadata as Record<string, unknown> | undefined) ?? {};
+    const eventTenantId =
+      typeof eventMetadata.tenant_id === 'string' && eventMetadata.tenant_id.trim() !== ''
+        ? eventMetadata.tenant_id
+        : null;
+    const eventSiteId =
+      typeof eventMetadata.site_id === 'string' && eventMetadata.site_id.trim() !== ''
+        ? eventMetadata.site_id
+        : null;
+    if (eventId === '') {
+      return json(400, { ok: false, error: 'missing_stripe_event_id' });
+    }
+    const existingEvent = store.getStripeWebhookEventByEventId(eventId);
+    if (existingEvent && existingEvent.status === 'processed') {
+      return json(200, {
+        ok: true,
+        received: true,
+        duplicate: true,
+        stripe_event_id: existingEvent.stripe_event_id,
+      });
+    }
+
+    try {
+      if (eventType === 'checkout.session.completed') {
+        const sessionId = typeof object.id === 'string' ? object.id : '';
+        const metadata = (object.metadata as Record<string, unknown> | undefined) ?? {};
+        const orderId = typeof metadata.order_id === 'string' ? metadata.order_id : '';
+        const customerId = typeof object.customer === 'string' ? object.customer : null;
+        const subscriptionId = typeof object.subscription === 'string' ? object.subscription : null;
+        const order =
+          (orderId !== '' ? store.getStripeCheckoutOrder(orderId) : null) ??
+          (sessionId !== '' ? store.getStripeCheckoutOrderBySessionId(sessionId) : null);
+        if (order) {
+          store.updateStripeCheckoutOrder(order.id, {
+            stripe_checkout_session_id: sessionId || order.stripe_checkout_session_id,
+            stripe_customer_id: customerId,
+            stripe_subscription_id: subscriptionId,
+            status: 'checkout_completed',
+            completed_at: new Date().toISOString(),
+          });
+          store.addAuditLog({
+            tenant_id: order.tenant_id,
+            site_id: order.site_id,
+            actor: 'stripe:webhook',
+            event_type: 'billing.checkout.completed',
+            payload: {
+              order_id: order.id,
+              stripe_checkout_session_id: sessionId,
+              stripe_subscription_id: subscriptionId,
+            },
+          });
+        }
+      }
+
+      if (
+        eventType === 'customer.subscription.created' ||
+        eventType === 'customer.subscription.updated' ||
+        eventType === 'customer.subscription.deleted'
+      ) {
+        const metadata = (object.metadata as Record<string, unknown> | undefined) ?? {};
+        const subscriptionId = typeof object.id === 'string' ? object.id : '';
+        const orderId = typeof metadata.order_id === 'string' ? metadata.order_id : '';
+        const siteId = typeof metadata.site_id === 'string' && metadata.site_id.trim() !== '' ? metadata.site_id : null;
+        const tenantId = typeof metadata.tenant_id === 'string' && metadata.tenant_id.trim() !== '' ? metadata.tenant_id : 'default';
+        const planCode = typeof metadata.plan_code === 'string' && metadata.plan_code.trim() !== '' ? metadata.plan_code : 'growth';
+        const pluginId = typeof metadata.plugin_id === 'string' ? metadata.plugin_id : '';
+        const customerId = typeof object.customer === 'string' ? object.customer : null;
+        const statusRaw = typeof object.status === 'string' ? object.status : 'active';
+        const status = eventType === 'customer.subscription.deleted' ? 'canceled' : billingStatusFromStripeSubscription(statusRaw);
+        const currentPeriodEndUnix =
+          typeof object.current_period_end === 'number' && Number.isFinite(object.current_period_end)
+            ? object.current_period_end
+            : null;
+        const currentPeriodEnd =
+          currentPeriodEndUnix !== null ? new Date(currentPeriodEndUnix * 1000).toISOString() : null;
+        const gracePeriodEnd = status === 'past_due' && currentPeriodEnd ? currentPeriodEnd : null;
+        const order =
+          (orderId !== '' ? store.getStripeCheckoutOrder(orderId) : null) ??
+          (subscriptionId !== '' ? store.getStripeCheckoutOrderBySubscriptionId(subscriptionId) : null);
+        if (order) {
+          store.updateStripeCheckoutOrder(order.id, {
+            stripe_customer_id: customerId,
+            stripe_subscription_id: subscriptionId,
+            status: status,
+            completed_at: order.completed_at ?? new Date().toISOString(),
+          });
+        }
+        if (siteId) {
+          const site = store.getSite(siteId);
+          if (!site) {
+            throw new Error(`stripe_webhook_site_not_found:${siteId}`);
+          }
+          const record = store.saveBillingSubscription({
+            site_id: site.id,
+            tenant_id: site.tenant_id,
+            plugin_id: pluginId || defaultPluginIdForSite(site.id),
+            plan_code: planCode,
+            status,
+            sandbox_enabled: status !== 'canceled' && status !== 'unpaid',
+            current_period_end: currentPeriodEnd,
+            grace_period_end: gracePeriodEnd,
+            updated_by: 'stripe:webhook',
+          });
+          await syncBillingSubscriptionToWorker({
+            site_id: record.site_id,
+            plugin_id: record.plugin_id,
+            plan_code: record.plan_code,
+            status: record.status,
+            sandbox_enabled: record.sandbox_enabled,
+            current_period_end: record.current_period_end,
+            grace_period_end: record.grace_period_end,
+          });
+          store.addAuditLog({
+            tenant_id: site.tenant_id,
+            site_id: site.id,
+            actor: 'stripe:webhook',
+            event_type: 'billing.subscription.stripe_synced',
+            payload: {
+              stripe_subscription_id: subscriptionId,
+              status,
+              plan_code: planCode,
+            },
+          });
+        }
+      }
+
+      store.createStripeWebhookEvent({
+        stripe_event_id: eventId,
+        event_type: eventType || 'unknown',
+        livemode: event.livemode === true,
+        status: 'processed',
+        tenant_id: eventTenantId,
+        site_id: eventSiteId,
+        payload: event as Record<string, unknown>,
+      });
+      return json(200, { ok: true, received: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'stripe_webhook_processing_failed';
+      store.createStripeWebhookEvent({
+        stripe_event_id: eventId,
+        event_type: eventType || 'unknown',
+        livemode: event.livemode === true,
+        status: 'failed',
+        tenant_id: eventTenantId,
+        site_id: eventSiteId,
+        payload: event as Record<string, unknown>,
+        error_message: message,
+      });
+      store.addAuditLog({
+        tenant_id: eventTenantId ?? '*',
+        site_id: eventSiteId,
+        actor: 'stripe:webhook',
+        event_type: 'billing.webhook.failed',
+        payload: {
+          stripe_event_id: eventId,
+          event_type: eventType || 'unknown',
+          error: message,
+        },
+      });
+      return json(500, { ok: false, error: message, stripe_event_id: eventId });
+    }
+  }
+
+  if (method === 'POST' && pathname === '/api/session/login') {
+    const parsed = await parseObjectBody(req);
+    if (!parsed.ok) {
+      return json(400, { ok: false, error: parsed.error });
+    }
+    const credentials = getConsoleCredentials();
+    if (!credentials) {
+      return json(503, { ok: false, error: 'console_login_not_configured' });
+    }
+    const body = parsed.body;
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (
+      !secureCompare(email, credentials.email.toLowerCase()) ||
+      !secureCompare(password, credentials.password)
+    ) {
+      return json(401, { ok: false, error: 'invalid_credentials' });
+    }
+    const expiresAt = new Date(Date.now() + sessionDurationMs()).toISOString();
+    const session = store.createConsoleSession({
+      email: credentials.email,
+      role: credentials.role,
+      tenant_id: credentials.tenant_id,
+      expires_at: expiresAt,
+    });
+    const maxAgeSeconds = Math.max(60, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000));
+    store.addAuditLog({
+      tenant_id: session.tenant_id,
+      site_id: null,
+      actor: `session:${session.email}`,
+      event_type: 'console.session.login',
+      payload: {
+        session_id: session.id,
+      },
+    });
+    return json(
+      200,
+      {
+        ok: true,
+        session: {
+          email: session.email,
+          role: session.role,
+          tenant_id: session.tenant_id,
+          expires_at: session.expires_at,
+        },
+      },
+      { 'set-cookie': sessionCookieValue(session.id, maxAgeSeconds) },
+    );
+  }
+
+  if (method === 'POST' && pathname === '/api/session/logout') {
+    const sessionId = parseCookies(req).get(CONSOLE_SESSION_COOKIE) ?? '';
+    if (sessionId !== '') {
+      const session = store.revokeConsoleSession(sessionId);
+      if (session) {
+        store.addAuditLog({
+          tenant_id: session.tenant_id,
+          site_id: null,
+          actor: `session:${session.email}`,
+          event_type: 'console.session.logout',
+          payload: {
+            session_id: session.id,
+          },
+        });
+      }
+    }
+    return json(200, { ok: true }, { 'set-cookie': expiredSessionCookieValue() });
+  }
+
+  if (method === 'GET' && pathname === '/api/session/me') {
+    const principal = await authorize(req, store, 'viewer', context);
+    if (!principal) {
+      return json(401, { ok: false, error: 'unauthorized' });
+    }
+    return json(200, {
+      ok: true,
+      session: {
+        type: principal.type,
+        role: principal.role,
+        tenant_id: principal.tenant_id,
+      },
+    });
+  }
+
   if (method === 'GET' && pathname === '/api/auth/me') {
-    const principal = authorize(req, store, 'viewer', context);
+    const principal = await authorize(req, store, 'viewer', context);
     if (!principal) {
       return json(401, { ok: false, error: 'unauthorized' });
     }
@@ -287,8 +1306,24 @@ async function route(
     });
   }
 
+  if (method === 'GET' && pathname === '/api/leads') {
+    const principal = await authorize(req, store, 'viewer', context);
+    if (!principal) {
+      return json(401, { ok: false, error: 'unauthorized' });
+    }
+    const status = url.searchParams.get('status')?.trim() || undefined;
+    const source = url.searchParams.get('source')?.trim() || undefined;
+    const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '200', 10);
+    const leads = store.listLeadCaptures({
+      status,
+      source,
+      limit: Number.isFinite(limitRaw) ? limitRaw : 200,
+    });
+    return json(200, { ok: true, leads });
+  }
+
   if (method === 'GET' && pathname === '/api/tokens') {
-    const principal = authorize(req, store, 'admin', context);
+    const principal = await authorize(req, store, 'admin', context);
     if (!principal) {
       return json(403, { ok: false, error: 'forbidden' });
     }
@@ -310,7 +1345,7 @@ async function route(
   }
 
   if (method === 'POST' && pathname === '/api/tokens') {
-    const principal = authorize(req, store, 'admin', context);
+    const principal = await authorize(req, store, 'admin', context);
     if (!principal) {
       return json(403, { ok: false, error: 'forbidden' });
     }
@@ -344,7 +1379,7 @@ async function route(
       rotateAfter = defaultRotateAfterIso(autoRotate);
     }
 
-    const issued = issueTokenSecret(tokenType);
+    const issued = await issueTokenSecret(tokenType);
     const record = store.createAuthToken({
       tenant_id: tenantId,
       token_type: tokenType,
@@ -379,7 +1414,7 @@ async function route(
   }
 
   if (method === 'POST' && pathname === '/api/tokens/auto-rotate') {
-    const principal = authorize(req, store, 'admin', context);
+    const principal = await authorize(req, store, 'admin', context);
     if (!principal) {
       return json(403, { ok: false, error: 'forbidden' });
     }
@@ -393,26 +1428,28 @@ async function route(
       limit,
     });
 
-    const rotated = due.map((record) => {
-      const next = rotateStoredToken(store, record, 'auto_rotated');
-      store.addAuditLog({
-        tenant_id: record.tenant_id,
-        site_id: null,
-        actor: principal.token,
-        event_type: 'auth.token.rotated',
-        payload: {
-          trigger: 'batch_auto_rotate',
+    const rotated = await Promise.all(
+      due.map(async (record) => {
+        const next = await rotateStoredToken(store, record, 'auto_rotated');
+        store.addAuditLog({
+          tenant_id: record.tenant_id,
+          site_id: null,
+          actor: principal.token,
+          event_type: 'auth.token.rotated',
+          payload: {
+            trigger: 'batch_auto_rotate',
+            from_token_id: record.id,
+            to_token_id: next.record.id,
+            token_type: record.token_type,
+          },
+        });
+        return {
           from_token_id: record.id,
-          to_token_id: next.record.id,
-          token_type: record.token_type,
-        },
-      });
-      return {
-        from_token_id: record.id,
-        token: next.token,
-        record: publicTokenRecord(next.record),
-      };
-    });
+          token: next.token,
+          record: publicTokenRecord(next.record),
+        };
+      }),
+    );
 
     return json(200, {
       ok: true,
@@ -421,8 +1458,59 @@ async function route(
     });
   }
 
+  if (method === 'POST' && pathname === '/api/tokens/publish-audit') {
+    const principal = await authorize(req, store, 'admin', context);
+    if (!principal) {
+      return json(403, { ok: false, error: 'forbidden' });
+    }
+    const parsed = await parseObjectBody(req);
+    if (!parsed.ok) {
+      return json(400, { ok: false, error: parsed.error });
+    }
+
+    const body = parsed.body;
+    const tenantId = resolveTenantScope(principal, body.tenant_id);
+    if (!tenantId) {
+      return json(403, { ok: false, error: 'tenant_scope_violation' });
+    }
+
+    const siteId = typeof body.site_id === 'string' && body.site_id.trim() !== '' ? body.site_id.trim() : null;
+    const payload: Record<string, unknown> = {
+      publisher: 'vault_kv',
+      ok: typeof body.ok === 'boolean' ? body.ok : true,
+      rotated_count: parseNonNegativeInt(body.rotated_count) ?? 0,
+      active_token_count: parseNonNegativeInt(body.active_token_count) ?? 0,
+      stale_token_count: parseNonNegativeInt(body.stale_token_count) ?? 0,
+    };
+
+    if (typeof body.vault_mount === 'string' && body.vault_mount.trim() !== '') {
+      payload.vault_mount = body.vault_mount.trim();
+    }
+    if (typeof body.vault_path === 'string' && body.vault_path.trim() !== '') {
+      payload.vault_path = body.vault_path.trim();
+    }
+    if (typeof body.vault_field === 'string' && body.vault_field.trim() !== '') {
+      payload.vault_field = body.vault_field.trim();
+    }
+    if (typeof body.error === 'string' && body.error.trim() !== '') {
+      payload.error = body.error.trim();
+    }
+    if (typeof body.note === 'string' && body.note.trim() !== '') {
+      payload.note = body.note.trim();
+    }
+
+    const log = store.addAuditLog({
+      tenant_id: tenantId,
+      site_id: siteId,
+      actor: principal.token,
+      event_type: 'auth.token.publish',
+      payload,
+    });
+    return json(201, { ok: true, log });
+  }
+
   if (method === 'POST' && pathname.startsWith('/api/tokens/')) {
-    const principal = authorize(req, store, 'admin', context);
+    const principal = await authorize(req, store, 'admin', context);
     if (!principal) {
       return json(403, { ok: false, error: 'forbidden' });
     }
@@ -474,7 +1562,7 @@ async function route(
       if (current.status !== 'active') {
         return json(409, { ok: false, error: 'token_not_active' });
       }
-      const rotated = rotateStoredToken(store, current, 'rotated');
+      const rotated = await rotateStoredToken(store, current, 'rotated');
       store.addAuditLog({
         tenant_id: current.tenant_id,
         site_id: null,
@@ -496,7 +1584,7 @@ async function route(
   }
 
   if (method === 'GET' && pathname === '/api/sites') {
-    const principal = authorize(req, store, 'viewer', context);
+    const principal = await authorize(req, store, 'viewer', context);
     if (!principal) {
       return json(401, { ok: false, error: 'unauthorized' });
     }
@@ -504,7 +1592,7 @@ async function route(
   }
 
   if (method === 'POST' && pathname === '/api/sites') {
-    const principal = authorize(req, store, 'admin', context);
+    const principal = await authorize(req, store, 'admin', context);
     if (!principal) {
       return json(403, { ok: false, error: 'forbidden' });
     }
@@ -548,8 +1636,355 @@ async function route(
     return json(201, { ok: true, site });
   }
 
+  if (method === 'GET' && pathname === '/api/billing/subscriptions') {
+    const principal = await authorize(req, store, 'viewer', context);
+    if (!principal) {
+      return json(401, { ok: false, error: 'unauthorized' });
+    }
+
+    const statusRaw = url.searchParams.get('status');
+    const parsedStatus = statusRaw ? parseBillingStatus(statusRaw) : null;
+    if (statusRaw && !parsedStatus) {
+      return json(400, { ok: false, error: 'invalid_billing_status' });
+    }
+    const status = parsedStatus ?? undefined;
+    const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '200', 10);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, limitRaw)) : 200;
+
+    const subscriptions = store.listBillingSubscriptions({
+      tenant_id: principal.tenant_id,
+      status,
+      limit,
+    });
+    const sites = store.listSites(principal.tenant_id);
+    const domainBySiteId = new Map<string, string>(sites.map((site) => [site.id, site.domain]));
+
+    return json(200, {
+      ok: true,
+      subscriptions: subscriptions.map((item) => ({
+        ...item,
+        domain: domainBySiteId.get(item.site_id) ?? null,
+        badge_tone: billingBadgeTone(item.status),
+        sandbox_access_allowed: isSandboxAllowedBySubscription({
+          status: item.status,
+          sandbox_enabled: item.sandbox_enabled,
+          grace_period_end: item.grace_period_end,
+        }),
+      })),
+    });
+  }
+
+  if (method === 'POST' && pathname === '/api/billing/subscriptions') {
+    const principal = await authorize(req, store, 'admin', context);
+    if (!principal) {
+      return json(403, { ok: false, error: 'forbidden' });
+    }
+    const parsed = await parseObjectBody(req);
+    if (!parsed.ok) {
+      return json(400, { ok: false, error: parsed.error });
+    }
+    const body = parsed.body;
+
+    const siteId = typeof body.site_id === 'string' ? body.site_id.trim() : '';
+    if (siteId === '') {
+      return json(400, { ok: false, error: 'missing_site_id' });
+    }
+    const site = store.getSite(siteId);
+    if (!site) {
+      return json(404, { ok: false, error: 'site_not_found' });
+    }
+    if (!siteAllowed(principal, site)) {
+      return json(403, { ok: false, error: 'tenant_scope_violation' });
+    }
+
+    const status = parseBillingStatus(body.status);
+    if (!status) {
+      return json(400, { ok: false, error: 'invalid_billing_status' });
+    }
+
+    const pluginIdRaw = typeof body.plugin_id === 'string' ? body.plugin_id.trim() : '';
+    const pluginId = pluginIdRaw || defaultPluginIdForSite(site.id);
+    const planCode =
+      typeof body.plan_code === 'string' && body.plan_code.trim() !== ''
+        ? body.plan_code.trim().slice(0, 120)
+        : 'sandbox_monthly';
+    const sandboxEnabled = parseBoolean(body.sandbox_enabled, true);
+    const currentPeriodEnd = parseOptionalIso(body.current_period_end);
+    const gracePeriodEnd = parseOptionalIso(body.grace_period_end);
+
+    const record = store.saveBillingSubscription({
+      site_id: site.id,
+      tenant_id: site.tenant_id,
+      plugin_id: pluginId,
+      plan_code: planCode,
+      status,
+      sandbox_enabled: sandboxEnabled,
+      current_period_end: currentPeriodEnd,
+      grace_period_end: gracePeriodEnd,
+      updated_by: principal.token,
+    });
+
+    const workerSync = await syncBillingSubscriptionToWorker({
+      site_id: record.site_id,
+      plugin_id: record.plugin_id,
+      plan_code: record.plan_code,
+      status: record.status,
+      sandbox_enabled: record.sandbox_enabled,
+      current_period_end: record.current_period_end,
+      grace_period_end: record.grace_period_end,
+    });
+
+    store.addAuditLog({
+      tenant_id: record.tenant_id,
+      site_id: record.site_id,
+      actor: principal.token,
+      event_type: 'billing.subscription.updated',
+      payload: {
+        plugin_id: record.plugin_id,
+        plan_code: record.plan_code,
+        status: record.status,
+        sandbox_enabled: record.sandbox_enabled,
+        current_period_end: record.current_period_end,
+        grace_period_end: record.grace_period_end,
+        worker_sync_ok: workerSync.ok,
+        worker_sync_skipped: workerSync.skipped ?? false,
+      },
+    });
+
+    return json(201, {
+      ok: true,
+      subscription: {
+        ...record,
+        domain: site.domain,
+        sandbox_access_allowed: isSandboxAllowedBySubscription({
+          status: record.status,
+          sandbox_enabled: record.sandbox_enabled,
+          grace_period_end: record.grace_period_end,
+        }),
+      },
+      worker_sync: workerSync,
+    });
+  }
+
+  if (method === 'GET' && pathname === '/api/fleet/risk') {
+    const principal = await authorize(req, store, 'viewer', context);
+    if (!principal) {
+      return json(401, { ok: false, error: 'unauthorized' });
+    }
+
+    const windowHoursRaw = Number.parseInt(url.searchParams.get('window_hours') ?? '24', 10);
+    const windowHours = Number.isFinite(windowHoursRaw)
+      ? Math.max(1, Math.min(24 * 14, windowHoursRaw))
+      : 24;
+    const cutoffMs = Date.now() - windowHours * 60 * 60 * 1000;
+
+    const sites = store.listSites(principal.tenant_id);
+    const allBindings = store.listSitePolicyBindings({
+      tenant_id: principal.tenant_id,
+      limit: 5000,
+    });
+    const bindingsBySite = new Map<string, SitePolicyBindingRecord[]>();
+    for (const binding of allBindings) {
+      if (!bindingsBySite.has(binding.site_id)) {
+        bindingsBySite.set(binding.site_id, []);
+      }
+      bindingsBySite.get(binding.site_id)?.push(binding);
+    }
+
+    const siteRisk = sites.map((site) => {
+      const actions = store.listActions({
+        tenant_id: principal.tenant_id,
+        site_id: site.id,
+      });
+      const bindings = bindingsBySite.get(site.id) ?? [];
+      return scoreSiteRisk({
+        site,
+        actions,
+        bindings,
+        cutoffMs,
+      });
+    });
+
+    const summary = {
+      total_sites: siteRisk.length,
+      high_risk_sites: siteRisk.filter((item) => item.risk_level === 'high').length,
+      medium_risk_sites: siteRisk.filter((item) => item.risk_level === 'medium').length,
+      low_risk_sites: siteRisk.filter((item) => item.risk_level === 'low').length,
+      mean_risk_score:
+        siteRisk.length > 0
+          ? Number((siteRisk.reduce((sum, item) => sum + item.risk_score, 0) / siteRisk.length).toFixed(2))
+          : 0,
+    };
+
+    return json(200, {
+      ok: true,
+      window_hours: windowHours,
+      summary,
+      sites: siteRisk,
+    });
+  }
+
+  if (method === 'GET' && pathname === '/api/fleet/policies') {
+    const principal = await authorize(req, store, 'viewer', context);
+    if (!principal) {
+      return json(401, { ok: false, error: 'unauthorized' });
+    }
+
+    const category = url.searchParams.get('category')?.trim() || undefined;
+    const limit = Number.parseInt(url.searchParams.get('limit') ?? '200', 10);
+    const templates = store.listPolicyTemplates({
+      tenant_id: principal.tenant_id,
+      category,
+      limit: Number.isFinite(limit) ? limit : 200,
+    });
+    const bindings = store.listSitePolicyBindings({
+      tenant_id: principal.tenant_id,
+      limit: 5000,
+    });
+    const bindingCountByTemplate = new Map<string, number>();
+    for (const binding of bindings) {
+      bindingCountByTemplate.set(
+        binding.template_id,
+        (bindingCountByTemplate.get(binding.template_id) ?? 0) + 1,
+      );
+    }
+
+    return json(200, {
+      ok: true,
+      templates: templates.map((template) => ({
+        ...template,
+        applied_sites: bindingCountByTemplate.get(template.id) ?? 0,
+      })),
+    });
+  }
+
+  if (method === 'POST' && pathname === '/api/fleet/policies') {
+    const principal = await authorize(req, store, 'admin', context);
+    if (!principal) {
+      return json(403, { ok: false, error: 'forbidden' });
+    }
+    const parsed = await parseObjectBody(req);
+    if (!parsed.ok) {
+      return json(400, { ok: false, error: parsed.error });
+    }
+    const body = parsed.body;
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (name === '') {
+      return json(400, { ok: false, error: 'missing_name' });
+    }
+
+    const tenantId = resolveTenantScope(principal, body.tenant_id);
+    if (!tenantId) {
+      return json(403, { ok: false, error: 'tenant_scope_violation' });
+    }
+    const template = store.savePolicyTemplate({
+      id: typeof body.id === 'string' ? body.id.trim() : undefined,
+      tenant_id: tenantId,
+      name,
+      description: typeof body.description === 'string' ? body.description.trim() : '',
+      category: typeof body.category === 'string' ? body.category.trim() : 'general',
+      config: parseJsonObjectValue(body.config),
+    });
+
+    store.addAuditLog({
+      tenant_id: tenantId,
+      site_id: null,
+      actor: principal.token,
+      event_type: 'fleet.policy.saved',
+      payload: {
+        template_id: template.id,
+        name: template.name,
+        category: template.category,
+      },
+    });
+
+    return json(201, { ok: true, template });
+  }
+
+  if (method === 'POST' && pathname.startsWith('/api/fleet/policies/')) {
+    const principal = await authorize(req, store, 'admin', context);
+    if (!principal) {
+      return json(403, { ok: false, error: 'forbidden' });
+    }
+    const parts = pathname.split('/').filter(Boolean);
+    if (parts.length === 5 && parts[0] === 'api' && parts[1] === 'fleet' && parts[2] === 'policies' && parts[4] === 'apply') {
+      const templateId = parts[3];
+      const template = store.getPolicyTemplate(templateId);
+      if (!template) {
+        return json(404, { ok: false, error: 'policy_template_not_found' });
+      }
+      if (principal.tenant_id !== '*' && principal.tenant_id !== template.tenant_id) {
+        return json(403, { ok: false, error: 'tenant_scope_violation' });
+      }
+
+      const parsed = await parseObjectBody(req);
+      if (!parsed.ok) {
+        return json(400, { ok: false, error: parsed.error });
+      }
+      const body = parsed.body;
+      const applyAll = typeof body.apply_all === 'boolean' ? body.apply_all : false;
+      const explicitSiteIds = parseStringArray(body.site_ids);
+      const oneSiteId = typeof body.site_id === 'string' ? body.site_id.trim() : '';
+
+      let targetSites: SiteRecord[] = [];
+      if (applyAll) {
+        targetSites = store.listSites(template.tenant_id);
+      } else {
+        const requested = oneSiteId !== '' ? [...explicitSiteIds, oneSiteId] : explicitSiteIds;
+        const uniqueIds = Array.from(new Set(requested));
+        if (uniqueIds.length === 0) {
+          return json(400, { ok: false, error: 'missing_site_targets' });
+        }
+        for (const siteId of uniqueIds) {
+          const site = store.getSite(siteId);
+          if (!site) {
+            return json(404, { ok: false, error: `site_not_found:${siteId}` });
+          }
+          if (site.tenant_id !== template.tenant_id) {
+            return json(403, { ok: false, error: 'site_tenant_mismatch' });
+          }
+          targetSites.push(site);
+        }
+      }
+
+      const status = typeof body.status === 'string' && body.status.trim() !== '' ? body.status.trim() : 'active';
+      const notes = typeof body.notes === 'string' && body.notes.trim() !== '' ? body.notes.trim() : null;
+
+      const bindings = targetSites.map((site) =>
+        store.upsertSitePolicyBinding({
+          tenant_id: template.tenant_id,
+          site_id: site.id,
+          template_id: template.id,
+          status,
+          applied_by: principal.token,
+          notes,
+        }),
+      );
+
+      store.addAuditLog({
+        tenant_id: template.tenant_id,
+        site_id: null,
+        actor: principal.token,
+        event_type: 'fleet.policy.applied',
+        payload: {
+          template_id: template.id,
+          applied_sites: bindings.length,
+          apply_all: applyAll,
+          status,
+        },
+      });
+
+      return json(200, {
+        ok: true,
+        template,
+        applied_count: bindings.length,
+        bindings,
+      });
+    }
+  }
+
   if (method === 'GET' && pathname === '/api/conversations') {
-    const principal = authorize(req, store, 'viewer', context);
+    const principal = await authorize(req, store, 'viewer', context);
     if (!principal) {
       return json(401, { ok: false, error: 'unauthorized' });
     }
@@ -562,7 +1997,7 @@ async function route(
   }
 
   if (method === 'GET' && pathname.startsWith('/api/conversations/')) {
-    const principal = authorize(req, store, 'viewer', context);
+    const principal = await authorize(req, store, 'viewer', context);
     if (!principal) {
       return json(401, { ok: false, error: 'unauthorized' });
     }
@@ -585,7 +2020,7 @@ async function route(
   }
 
   if (method === 'POST' && pathname === '/api/chat/message') {
-    const principal = authorize(req, store, 'operator', context);
+    const principal = await authorize(req, store, 'operator', context);
     if (!principal) {
       return json(403, { ok: false, error: 'forbidden' });
     }
@@ -680,7 +2115,7 @@ async function route(
   }
 
   if (method === 'GET' && pathname === '/api/actions') {
-    const principal = authorize(req, store, 'viewer', context);
+    const principal = await authorize(req, store, 'viewer', context);
     if (!principal) {
       return json(401, { ok: false, error: 'unauthorized' });
     }
@@ -698,7 +2133,7 @@ async function route(
   }
 
   if (method === 'GET' && pathname === '/api/audit') {
-    const principal = authorize(req, store, 'viewer', context);
+    const principal = await authorize(req, store, 'viewer', context);
     if (!principal) {
       return json(401, { ok: false, error: 'unauthorized' });
     }
@@ -717,7 +2152,7 @@ async function route(
   if (method === 'POST' && pathname.startsWith('/api/actions/')) {
     const parts = pathname.split('/').filter(Boolean);
     if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'actions' && parts[3] === 'approve') {
-      const principal = authorize(req, store, 'admin', context);
+      const principal = await authorize(req, store, 'admin', context);
       if (!principal) {
         return json(403, { ok: false, error: 'forbidden' });
       }
@@ -744,7 +2179,7 @@ async function route(
     }
 
     if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'actions' && parts[3] === 'execute') {
-      const principal = authorize(req, store, 'operator', context);
+      const principal = await authorize(req, store, 'operator', context);
       if (!principal) {
         return json(403, { ok: false, error: 'forbidden' });
       }
@@ -812,7 +2247,7 @@ async function route(
   }
 
   if (method === 'POST' && pathname === '/api/agent/execute') {
-    const principal = authorize(req, store, 'operator', context);
+    const principal = await authorize(req, store, 'operator', context);
     if (!principal) {
       return json(403, { ok: false, error: 'forbidden' });
     }

@@ -21,6 +21,16 @@ This repo is now organized as a multi-product suite (not web3-only):
 - [AI_WP_Plugin_Family](plugins/ai-wp-host-optimizer/README.md) - AI WP Host Optimizer Plugin
 - [AI_WP_Plugin_Family](plugins/ai-addwords-meta-plugin/README.md) - AI AddWords + Meta Paid Traffic Plugin
 
+## New Ops Workflows
+
+- **Performance SLO mode (Uptime tab)**
+  - Set goals like guest p95 TTFB, error rate, cache hit rate.
+  - Run benchmark + strategy recommendation + canary plan.
+  - Auto-rollback trigger logic when post-canary SLO degrades.
+- **Safe updates with rollback (Security tab)**
+  - Stage updates -> canary rollout -> health checks -> rollback guardrail.
+  - Covers core/plugin/theme update candidates as a controlled workflow.
+
 ## Repository layout
 
 ```text
@@ -120,6 +130,12 @@ npm run build
 npm start
 ```
 
+Fleet mode APIs/UI are included in `apps/ai-vps-control-panel`:
+- multi-site risk dashboard (`/api/fleet/risk`)
+- policy template management (`/api/fleet/policies`)
+- bulk policy apply (`/api/fleet/policies/:id/apply`)
+- sandbox billing controls (`/api/billing/subscriptions`)
+
 ### Analytics OAuth + Deploy setup
 
 Set worker secrets:
@@ -179,6 +195,55 @@ Selection order is weighted by:
 Claims are serialized with a Durable Object lock so multiple agents do not claim the same sandbox slot.
 Agents can also share a conflict pool for blocked work, read active conflicts, and resolve/dismiss them after remediation.
 All sandbox routes use signed plugin auth and require capability token `CAP_TOKEN_SANDBOX_WRITE`.
+
+### Proof-Of-Work + Incident Mode
+
+New ops-grade routes:
+- `POST /plugin/wp/incident/mode` (or `/plugin/site/incident/mode`)
+- `POST /plugin/wp/jobs/reports` (or `/plugin/site/jobs/reports`)
+
+Behavior:
+- Incident mode creates a high-risk diagnostics job and an incident timeline report.
+- Performance SLO and Safe Update workflows now persist evidence artifacts per job.
+- Job reports return jobs + attached artifacts so agencies can export proof of work.
+
+### Cost-Aware Sandbox Guardrails
+
+Sandbox request admission now reserves against a per-site monthly budget before queueing.
+
+Default worker vars:
+- `SANDBOX_DEFAULT_MONTHLY_BUDGET_USD=50`
+- `SANDBOX_DEFAULT_COST_PER_MINUTE_USD=0.08`
+- `SANDBOX_DEFAULT_HARD_LIMIT=1`
+
+Budget rejection response:
+- `402 sandbox_budget_exceeded` with projected/current budget details.
+
+### Replay Cleanup Scaling
+
+Replay artifact cleanup is no longer full-delete on every request.
+- Probabilistic cleanup on request path.
+- Scheduled cleanup via cron trigger (`17 * * * *`).
+- Tunables:
+  - `REPLAY_RETENTION_SECONDS` (default `86400`)
+  - `REPLAY_CLEANUP_SAMPLE_RATE` (default `0.01`)
+
+### Monthly sandbox license enforcement
+
+Set worker controls:
+- `BILLING_SANDBOX_ENFORCEMENT=1`
+- `BILLING_SANDBOX_DEFAULT_ALLOW=0`
+- secret `BILLING_INTERNAL_API_TOKEN`
+
+AI VPS panel sync env:
+- `PANEL_WORKER_BASE_URL`
+- `PANEL_WORKER_BILLING_INTERNAL_TOKEN` (match worker secret)
+- `PANEL_WORKER_PLUGIN_PREFIX` (default `ai-vps-panel`)
+
+Update subscription state from panel API/UI:
+- `POST /api/billing/subscriptions` with `site_id`, `status`, `sandbox_enabled`, `plan_code`, optional period/grace timestamps.
+- This syncs to worker `/internal/billing/subscription/upsert`.
+- On non-payment (`unpaid`/`canceled` or `sandbox_enabled=false`), sandbox endpoints return `402 sandbox_subscription_inactive`.
 
 ## Tests
 

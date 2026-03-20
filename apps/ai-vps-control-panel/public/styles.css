@@ -40,6 +40,54 @@ body {
   gap: 8px;
 }
 
+.auth-grid {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.auth-status-wrap {
+  padding: 0 20px 12px;
+}
+
+.auth-state {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.billing-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.billing-badge-good {
+  background: rgba(34, 111, 84, 0.12);
+  color: #183a2d;
+}
+
+.billing-badge-warn {
+  background: rgba(204, 117, 34, 0.12);
+  color: #8a4b14;
+}
+
+.billing-badge-bad {
+  background: rgba(168, 49, 49, 0.12);
+  color: #7a1f1f;
+}
+
+.billing-badge-neutral {
+  background: rgba(28, 31, 26, 0.05);
+  color: var(--muted);
+}
+
 .layout {
   display: grid;
   gap: 14px;
@@ -129,4 +177,39 @@ td {
   padding: 8px;
   background: #fbfcf8;
   white-space: pre-wrap;
+}
+
+.payload-dialog {
+  width: min(960px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 0;
+}
+
+.payload-dialog::backdrop {
+  background: rgba(28, 31, 26, 0.45);
+}
+
+.payload-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  background: #fefefc;
+}
+
+.payload-dialog-header h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.payload-dialog-body {
+  margin: 0;
+  padding: 16px;
+  max-height: 70vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: #fbfcf8;
 }

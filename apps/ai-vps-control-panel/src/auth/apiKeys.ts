@@ -60,7 +60,7 @@ function parseEntry(entry: string): { token: string; principal: EnvPrincipalTemp
 function parseApiKeySpec(spec: string): Map<string, EnvPrincipalTemplate> {
   const map = new Map<string, EnvPrincipalTemplate>();
   const entries = spec
-    .split(/\r?\n|,/) 
+    .split(/\r?\n|,/)
     .map((entry) => entry.trim())
     .filter((entry) => entry !== '');
 
@@ -103,7 +103,7 @@ function extractToken(req: http.IncomingMessage): string {
   return '';
 }
 
-export function authenticate(req: http.IncomingMessage, store?: SqliteStore): ApiPrincipal | null {
+export async function authenticate(req: http.IncomingMessage, store?: SqliteStore): Promise<ApiPrincipal | null> {
   const providedToken = extractToken(req);
   if (providedToken === '') {
     return null;
@@ -126,16 +126,17 @@ export function authenticate(req: http.IncomingMessage, store?: SqliteStore): Ap
     return null;
   }
 
+  const providedTokenHash = await hashTokenSecret(providedToken);
   const tokenRecord = store.findActiveTokenByHash({
     token_prefix: tokenPrefix(providedToken),
-    token_hash: hashTokenSecret(providedToken),
+    token_hash: providedTokenHash,
   });
   if (!tokenRecord || tokenRecord.status !== 'active') {
     return null;
   }
 
   if (tokenRecord.auto_rotate && tokenRecord.rotate_after && tokenRecord.rotate_after <= new Date().toISOString()) {
-    const rotated = rotateStoredToken(store, tokenRecord, 'auto_rotated');
+    const rotated = await rotateStoredToken(store, tokenRecord, 'auto_rotated');
     store.touchTokenLastUsed(rotated.record.id);
     store.addAuditLog({
       tenant_id: rotated.record.tenant_id,
