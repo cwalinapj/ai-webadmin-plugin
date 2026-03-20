@@ -14,6 +14,7 @@ Initial backend scaffold for a custom VPS control panel operated through a chat-
 - Dry-run-first execution mode for risky operations.
 - Persistent API-key/PAT management with hashed-at-rest secrets, audit trails, revoke/rotate endpoints, and auto-rotation support.
 - Supports `switch_load_balancer_mode` action mapped to `/root/watchdog-heartbeat.sh` with strict args validation.
+- Supports `run_security_scan` action mapped to `/root/run-security-scan.sh` or `AI_VPS_RUN_SECURITY_SCAN_SCRIPT_PATH`.
 - Fleet mode: multi-site risk dashboard, policy templates, and bulk policy apply across sites.
 - Billing mode: per-site monthly sandbox subscription state with sync to worker enforcement.
 

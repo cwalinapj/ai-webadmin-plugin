@@ -10,9 +10,13 @@ interface ExecResult {
 type ExecFn = (bin: string, args: string[], timeoutMs: number) => Promise<ExecResult>;
 
 const ALLOWED_SERVICES = new Set(['nginx', 'apache2', 'httpd', 'mysql', 'mariadb', 'php-fpm', 'redis']);
-const WATCHDOG_SCRIPT_PATH = '/root/watchdog-heartbeat.sh';
 const BACKEND_TARGET_REGEX = /^[a-zA-Z0-9.-]+:\d{2,5}$/;
 const SITE_VALUE_REGEX = /^[a-zA-Z0-9.-]+$/;
+
+function scriptPath(envName: string, fallback: string): string {
+  const value = String(process.env[envName] ?? '').trim();
+  return value === '' ? fallback : value;
+}
 
 async function defaultExec(bin: string, args: string[], timeoutMs: number): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve) => {
@@ -136,6 +140,37 @@ export class SafeCommandExecutor {
       return { ok: true, value: { bin: 'tar', args: ['-czf', outputPath, sitePath] } };
     }
 
+    if (action.type === 'run_security_scan') {
+      const site = String(action.args.site ?? '').trim().toLowerCase();
+      if (site === '' || !SITE_VALUE_REGEX.test(site)) {
+        return { ok: false, error: 'invalid_site' };
+      }
+
+      const scanPath = String(action.args.path ?? '').trim();
+      if (scanPath === '' || !scanPath.startsWith('/')) {
+        return { ok: false, error: 'invalid_scan_path' };
+      }
+
+      const outputPath = String(action.args.output_path ?? '').trim();
+      if (outputPath !== '' && !outputPath.startsWith('/var/log/ai-webadmin/')) {
+        return { ok: false, error: 'output_path_not_allowed' };
+      }
+
+      const maxFindings = boundedInteger(action.args.max_findings, 50, 1, 1000);
+      const args: string[] = ['--site', site, '--path', scanPath, '--max-findings', String(maxFindings)];
+      if (outputPath !== '') {
+        args.push('--output-path', outputPath);
+      }
+
+      return {
+        ok: true,
+        value: {
+          bin: scriptPath('AI_VPS_RUN_SECURITY_SCAN_SCRIPT_PATH', '/root/run-security-scan.sh'),
+          args,
+        },
+      };
+    }
+
     if (action.type === 'switch_load_balancer_mode') {
       const site = String(action.args.site ?? '').trim().toLowerCase();
       if (site === '' || !SITE_VALUE_REGEX.test(site)) {
@@ -201,7 +236,7 @@ export class SafeCommandExecutor {
       return {
         ok: true,
         value: {
-          bin: WATCHDOG_SCRIPT_PATH,
+          bin: scriptPath('AI_VPS_WATCHDOG_SCRIPT_PATH', '/root/watchdog-heartbeat.sh'),
           args,
         },
       };

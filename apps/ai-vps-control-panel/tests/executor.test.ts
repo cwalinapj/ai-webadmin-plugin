@@ -85,4 +85,28 @@ describe('safe command executor', () => {
     expect(result.ok).toBe(false);
     expect(result.blocked_reason).toBe('invalid_backend_target');
   });
+
+  it('builds security scan command with validated args', async () => {
+    process.env.AI_VPS_RUN_SECURITY_SCAN_SCRIPT_PATH = '/tmp/run-security-scan.sh';
+    const executor = new SafeCommandExecutor();
+    const action: AgentAction = {
+      id: 'a5',
+      type: 'run_security_scan',
+      description: 'security scan',
+      risk: 'medium',
+      requires_confirmation: false,
+      args: {
+        site: 'example.com',
+        path: '/var/www/example.com',
+        output_path: '/var/log/ai-webadmin/example-scan.json',
+        max_findings: 25,
+      },
+    };
+
+    const result = await executor.execute(action, { dryRun: true, confirmed: true });
+    expect(result.ok).toBe(true);
+    expect(result.command?.bin).toBe('/tmp/run-security-scan.sh');
+    expect(result.command?.args).toContain('--path');
+    expect(result.command?.args).toContain('/var/www/example.com');
+  });
 });

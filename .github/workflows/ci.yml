@@ -8,6 +8,22 @@ on:
   pull_request:
 
 jobs:
+  host-ops-smoke:
+    name: Host Ops Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate script syntax
+        run: |
+          for script in scripts/*.sh scripts/lib/*.sh; do
+            bash -n "$script"
+          done
+
+      - name: Run host ops smoke tests
+        run: ./scripts/test-host-ops-smoke.sh
+
   worker-tests:
     name: Worker Tests
     runs-on: ubuntu-latest

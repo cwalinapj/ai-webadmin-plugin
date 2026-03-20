@@ -22,6 +22,7 @@ Notes:
 - Requires LXD + mysql + nginx on the host.
 - Uses /root/wp_sandbox_run.sh to build the production replica.
 - Clones sandbox from production snapshot to ensure identical runtime.
+- Supports `--dry-run` to emit the planned replica/sandbox topology without mutating the host.
 TXT
 }
 
@@ -65,6 +66,7 @@ main() {
   local runner_script="/root/wp_sandbox_run.sh"
   local snapshot_name="pair-base"
   local replace_existing="yes"
+  local dry_run="no"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -82,13 +84,13 @@ main() {
       --runner-script) runner_script="$2"; shift 2 ;;
       --snapshot-name) snapshot_name="$2"; shift 2 ;;
       --replace-existing) replace_existing="$2"; shift 2 ;;
+      --dry-run) dry_run="yes"; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1" ;;
     esac
   done
 
   [[ -n "${site}" && -n "${wp_root}" && -n "${db_name}" ]] || die "requires --site --wp-root --db-name"
-  [[ -x "${runner_script}" ]] || die "runner script not executable: ${runner_script}"
   [[ "${db_mode}" == "live" || "${db_mode}" == "cached" ]] || die "--db-mode must be live|cached"
   [[ "${replace_existing}" == "yes" || "${replace_existing}" == "no" ]] || die "--replace-existing must be yes|no"
 
@@ -102,6 +104,15 @@ main() {
   if [[ -z "${sandbox_host}" ]]; then
     sandbox_host="sandbox-replica.${site_key}.local"
   fi
+
+  if [[ "${dry_run}" == "yes" ]]; then
+    printf '{"ok":true,"dry_run":true,"site":"%s","wp_root":"%s","db_name":"%s","db_mode":"%s","prod":{"host":"%s","port":%s},"sandbox":{"host":"%s","port":%s},"snapshot":"%s","replace_existing":"%s","runner_script":"%s"}\n' \
+      "${site}" "${wp_root}" "${db_name}" "${db_mode}" \
+      "${prod_host}" "${prod_port}" "${sandbox_host}" "${sandbox_port}" "${snapshot_name}" "${replace_existing}" "${runner_script}"
+    return 0
+  fi
+
+  [[ -x "${runner_script}" ]] || die "runner script not executable: ${runner_script}"
 
   local runner_output
   log "creating production replica on port ${prod_port}"

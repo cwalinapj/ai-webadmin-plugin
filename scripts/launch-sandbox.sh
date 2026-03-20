@@ -221,7 +221,7 @@ cmd_acquire() {
 
   local existing_lease
   existing_lease="$(find_lease_for_site "${site}" || true)"
-  if [[ -n "${existing_lease}" && ! lease_expired "${existing_lease}" ]]; then
+  if [[ -n "${existing_lease}" ]] && ! lease_expired "${existing_lease}"; then
     local slot container_name port expires_at
     slot="$(parse_lease_value "${existing_lease}" "slot")"
     container_name="$(parse_lease_value "${existing_lease}" "container_name")"

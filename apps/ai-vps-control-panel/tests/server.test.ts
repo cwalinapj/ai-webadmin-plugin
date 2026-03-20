@@ -1,9 +1,13 @@
 import { createHmac } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer } from '../src/server.js';
 
 let server: ReturnType<typeof createServer>;
 let baseUrl = '';
+let tempScriptDir = '';
 
 beforeAll(async () => {
   process.env.AI_VPS_API_KEYS = [
@@ -14,6 +18,15 @@ beforeAll(async () => {
   process.env.AI_VPS_DB_PATH = ':memory:';
   process.env.AI_VPS_CONSOLE_EMAIL = 'owner@loccount.local';
   process.env.AI_VPS_CONSOLE_PASSWORD = 'console-pass-123';
+  tempScriptDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-vps-panel-tests-'));
+  const securityScanScriptPath = path.join(tempScriptDir, 'run-security-scan.sh');
+  await fs.writeFile(
+    securityScanScriptPath,
+    '#!/usr/bin/env bash\nset -euo pipefail\nprintf \'{"ok":true,"scan":"completed","args":"%s"}\\n\' \"$*\"\n',
+    'utf8',
+  );
+  await fs.chmod(securityScanScriptPath, 0o755);
+  process.env.AI_VPS_RUN_SECURITY_SCAN_SCRIPT_PATH = securityScanScriptPath;
   server = createServer();
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve());
@@ -35,6 +48,9 @@ afterAll(async () => {
       resolve();
     });
   });
+  if (tempScriptDir !== '') {
+    await fs.rm(tempScriptDir, { recursive: true, force: true });
+  }
 });
 
 describe('ai vps control panel api', () => {
@@ -913,6 +929,64 @@ describe('ai vps control panel api', () => {
     const siteTwo = fleetRiskBody.sites.find((item) => item.site_id === 'fleet-site-2');
     expect((siteOne?.risk_score ?? 0) >= (siteTwo?.risk_score ?? 0)).toBe(true);
     expect(siteOne?.policy_templates.includes('Agency Baseline')).toBe(true);
+  });
+
+  it('executes a host-side security scan action through the panel executor', async () => {
+    const createSiteRes = await fetch(`${baseUrl}/api/sites`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'scan-site-1',
+        tenant_id: 'tenant-a',
+        domain: 'scan.example.com',
+        panel_type: 'ai_vps_panel',
+        runtime_type: 'php_generic',
+      }),
+    });
+    expect(createSiteRes.status).toBe(201);
+
+    const executeRes = await fetch(`${baseUrl}/api/agent/execute`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        site_id: 'scan-site-1',
+        dry_run: false,
+        confirmed: true,
+        action: {
+          id: 'scan-action-1',
+          type: 'run_security_scan',
+          description: 'scan site for suspicious php',
+          risk: 'medium',
+          requires_confirmation: false,
+          args: {
+            site: 'scan.example.com',
+            path: '/var/www/scan.example.com',
+            max_findings: 10,
+          },
+        },
+      }),
+    });
+    const executeBody = (await executeRes.json()) as {
+      ok: boolean;
+      dry_run: boolean;
+      stdout?: string;
+      command?: { bin: string; args: string[] };
+      worker_sync?: { ok: boolean; details?: { skipped?: boolean } };
+    };
+
+    expect(executeRes.status).toBe(200);
+    expect(executeBody.ok).toBe(true);
+    expect(executeBody.dry_run).toBe(false);
+    expect(executeBody.command?.bin).toContain('run-security-scan.sh');
+    expect(executeBody.stdout).toContain('"scan":"completed"');
+    expect(executeBody.worker_sync?.ok).toBe(true);
+    expect(executeBody.worker_sync?.details?.skipped).toBe(true);
   });
 
   it('manages monthly sandbox licensing state and exposes blocked access when unpaid', async () => {

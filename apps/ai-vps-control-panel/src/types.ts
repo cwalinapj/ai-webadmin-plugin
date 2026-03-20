@@ -9,6 +9,7 @@ export type AgentActionType =
   | 'restart_service'
   | 'tail_service_logs'
   | 'run_site_snapshot'
+  | 'run_security_scan'
   | 'switch_load_balancer_mode'
   | 'noop';
 
