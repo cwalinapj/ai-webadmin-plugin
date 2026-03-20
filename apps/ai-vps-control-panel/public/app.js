@@ -854,7 +854,10 @@ async function queueHostOpsAction(event) {
     const result = await api("/api/actions/queue", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...payload,
+        idempotency_key: `hostops-${crypto.randomUUID()}`,
+      }),
     });
     text(hostOpsOutput, JSON.stringify(result, null, 2));
     await loadQueue();

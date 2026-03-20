@@ -993,6 +993,153 @@ describe('ai vps control panel api', () => {
     expect(executeBody.stdout).toContain('"snapshot":"completed"');
   });
 
+  it('dedupes manual queue submissions by idempotency key', async () => {
+    const createSiteRes = await fetch(`${baseUrl}/api/sites`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'idempotent-queue-site',
+        tenant_id: 'tenant-a',
+        domain: 'idempotent-queue.example.com',
+        panel_type: 'ai_vps_panel',
+        runtime_type: 'php_generic',
+      }),
+    });
+    expect(createSiteRes.status).toBe(201);
+
+    const payload = {
+      site_id: 'idempotent-queue-site',
+      idempotency_key: 'idempotency-test-key-1',
+      action: {
+        type: 'run_site_snapshot',
+        description: 'idempotent snapshot',
+        risk: 'medium',
+        requires_confirmation: true,
+        args: {
+          site: 'idempotent-queue-site',
+          site_path: '/tmp/idempotent-queue-site',
+          output_dir: '/tmp',
+        },
+      },
+    };
+
+    const firstRes = await fetch(`${baseUrl}/api/actions/queue`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    const firstBody = (await firstRes.json()) as { ok: boolean; action: { id: string } };
+    expect(firstRes.status).toBe(201);
+    expect(firstBody.ok).toBe(true);
+
+    const secondRes = await fetch(`${baseUrl}/api/actions/queue`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    const secondBody = (await secondRes.json()) as { ok: boolean; deduped: boolean; action: { id: string } };
+    expect(secondRes.status).toBe(200);
+    expect(secondBody.ok).toBe(true);
+    expect(secondBody.deduped).toBe(true);
+    expect(secondBody.action.id).toBe(firstBody.action.id);
+  });
+
+  it('enforces manual queue guardrails from applied policy templates', async () => {
+    const createSiteRes = await fetch(`${baseUrl}/api/sites`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'guardrail-queue-site',
+        tenant_id: 'tenant-a',
+        domain: 'guardrail-queue.example.com',
+        panel_type: 'ai_vps_panel',
+        runtime_type: 'php_generic',
+      }),
+    });
+    expect(createSiteRes.status).toBe(201);
+
+    const savePolicyRes = await fetch(`${baseUrl}/api/fleet/policies`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'Manual Queue Guardrail',
+        category: 'operations',
+        description: 'restrict queue action scope',
+        config: {
+          manual_queue: {
+            allowed_action_types: ['run_site_snapshot', 'verify_site_upgrade'],
+            max_risk: 'medium',
+            require_confirmation_for: ['run_site_snapshot'],
+            arg_path_prefixes: {
+              site_path: ['/tmp/'],
+            },
+          },
+        },
+      }),
+    });
+    const savePolicyBody = (await savePolicyRes.json()) as { ok: boolean; template: { id: string } };
+    expect(savePolicyRes.status).toBe(201);
+    expect(savePolicyBody.ok).toBe(true);
+
+    const applyPolicyRes = await fetch(
+      `${baseUrl}/api/fleet/policies/${encodeURIComponent(savePolicyBody.template.id)}/apply`,
+      {
+        method: 'POST',
+        headers: {
+          ...authHeaders('admin-a'),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          site_ids: ['guardrail-queue-site'],
+          status: 'active',
+        }),
+      },
+    );
+    expect(applyPolicyRes.status).toBe(200);
+
+    const blockedRes = await fetch(`${baseUrl}/api/actions/queue`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        site_id: 'guardrail-queue-site',
+        action: {
+          type: 'rotate_secret',
+          description: 'should be blocked by guardrail',
+          risk: 'high',
+          requires_confirmation: true,
+          args: {
+            name: 'API_TOKEN',
+            write_env_file: '/tmp/guardrail.env',
+          },
+        },
+      }),
+    });
+    const blockedBody = (await blockedRes.json()) as { ok: boolean; error: string; details: string };
+    expect(blockedRes.status).toBe(403);
+    expect(blockedBody.error).toBe('policy_guardrail_violation');
+    expect(blockedBody.details.includes('action_type_not_allowed') || blockedBody.details.includes('risk_exceeds_max')).toBe(
+      true,
+    );
+  });
+
   it('supports fleet mode risk dashboard and policy template apply across sites', async () => {
     const siteARes = await fetch(`${baseUrl}/api/sites`, {
       method: 'POST',

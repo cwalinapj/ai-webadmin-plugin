@@ -18,6 +18,7 @@ import type {
   BillingStatus,
   ChatRequest,
   ExecuteActionRequest,
+  PolicyTemplateRecord,
   QueuedActionRecord,
   RiskLevel,
   Role,
@@ -307,6 +308,16 @@ function parseRiskLevel(value: unknown): RiskLevel {
   return 'medium';
 }
 
+function riskLevelScore(risk: RiskLevel): number {
+  if (risk === 'high') {
+    return 3;
+  }
+  if (risk === 'medium') {
+    return 2;
+  }
+  return 1;
+}
+
 function parseActionType(value: unknown): AgentActionType | null {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (raw === '') {
@@ -329,6 +340,93 @@ function parseActionType(value: unknown): AgentActionType | null {
     return null;
   }
   return raw as AgentActionType;
+}
+
+function parseStringArrayOrEmpty(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => item !== '');
+}
+
+function pathStartsWithAllowedPrefix(value: string, prefixes: string[]): boolean {
+  return prefixes.some((prefix) => {
+    const normalized = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
+    return value === normalized || value.startsWith(prefix);
+  });
+}
+
+function parsePathRuleMap(value: unknown): Record<string, string[]> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {};
+  }
+  const source = value as Record<string, unknown>;
+  const mapped: Record<string, string[]> = {};
+  for (const [key, raw] of Object.entries(source)) {
+    const entries = parseStringArrayOrEmpty(raw);
+    if (entries.length > 0) {
+      mapped[key] = entries;
+    }
+  }
+  return mapped;
+}
+
+function enforceManualQueueGuardrails(
+  action: AgentAction,
+  templates: PolicyTemplateRecord[],
+): { ok: true } | { ok: false; error: string; details: string } {
+  for (const template of templates) {
+    const policy = parseJsonObjectValue((template.config as Record<string, unknown>).manual_queue);
+    if (Object.keys(policy).length === 0) {
+      continue;
+    }
+
+    const allowedTypes = parseStringArrayOrEmpty(policy.allowed_action_types);
+    if (allowedTypes.length > 0 && !allowedTypes.includes(action.type)) {
+      return {
+        ok: false,
+        error: 'policy_guardrail_violation',
+        details: `template:${template.name}:action_type_not_allowed`,
+      };
+    }
+
+    const maxRisk = parseRiskLevel(policy.max_risk);
+    if (riskLevelScore(action.risk) > riskLevelScore(maxRisk)) {
+      return {
+        ok: false,
+        error: 'policy_guardrail_violation',
+        details: `template:${template.name}:risk_exceeds_max`,
+      };
+    }
+
+    const requireConfirmationFor = parseStringArrayOrEmpty(policy.require_confirmation_for);
+    if (requireConfirmationFor.includes(action.type) && !action.requires_confirmation) {
+      return {
+        ok: false,
+        error: 'policy_guardrail_violation',
+        details: `template:${template.name}:confirmation_required`,
+      };
+    }
+
+    const argPathPrefixes = parsePathRuleMap(policy.arg_path_prefixes);
+    for (const [argKey, prefixes] of Object.entries(argPathPrefixes)) {
+      const value = action.args[argKey];
+      if (typeof value !== 'string' || value.trim() === '') {
+        continue;
+      }
+      if (!pathStartsWithAllowedPrefix(value.trim(), prefixes)) {
+        return {
+          ok: false,
+          error: 'policy_guardrail_violation',
+          details: `template:${template.name}:arg_path_prefix_violation:${argKey}`,
+        };
+      }
+    }
+  }
+
+  return { ok: true };
 }
 
 function parseTokenType(value: unknown): TokenType {
@@ -2197,6 +2295,10 @@ async function route(
     }
 
     const actionArgs = parseJsonObjectValue((rawAction as Record<string, unknown>).args);
+    const idempotencyKey =
+      typeof body.idempotency_key === 'string' && body.idempotency_key.trim() !== ''
+        ? body.idempotency_key.trim()
+        : '';
     const action: AgentAction = {
       id:
         typeof (rawAction as Record<string, unknown>).id === 'string' &&
@@ -2211,8 +2313,54 @@ async function route(
           : `Manual action: ${actionType}`,
       risk: parseRiskLevel((rawAction as Record<string, unknown>).risk),
       requires_confirmation: parseBoolean((rawAction as Record<string, unknown>).requires_confirmation, false),
-      args: actionArgs as Record<string, string | number | boolean>,
+      args: {
+        ...(actionArgs as Record<string, string | number | boolean>),
+        ...(idempotencyKey !== '' ? { __idempotency_key: idempotencyKey } : {}),
+      },
     };
+
+    if (idempotencyKey !== '') {
+      const existing = store
+        .listActions({
+          tenant_id: site.tenant_id,
+          site_id: site.id,
+        })
+        .find((item) => {
+          const value = item.args.__idempotency_key;
+          if (typeof value !== 'string' || value.trim() === '') {
+            return false;
+          }
+          if (value.trim() !== idempotencyKey) {
+            return false;
+          }
+          return item.status === 'pending' || item.status === 'approved' || item.status === 'executed';
+        });
+
+      if (existing) {
+        return json(200, {
+          ok: true,
+          deduped: true,
+          action: existing,
+        });
+      }
+    }
+
+    const bindings = store.listSitePolicyBindings({
+      tenant_id: site.tenant_id,
+      site_id: site.id,
+      limit: 200,
+    });
+    const templates = bindings
+      .map((binding) => store.getPolicyTemplate(binding.template_id))
+      .filter((item): item is PolicyTemplateRecord => Boolean(item));
+    const guardrail = enforceManualQueueGuardrails(action, templates);
+    if (!guardrail.ok) {
+      return json(403, {
+        ok: false,
+        error: guardrail.error,
+        details: guardrail.details,
+      });
+    }
 
     const preview = await executor.execute(action, {
       dryRun: true,
