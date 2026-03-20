@@ -190,6 +190,9 @@ export class SqliteStore {
         executed_by TEXT,
         executed_at TEXT,
         execute_result_json TEXT,
+        idempotency_key TEXT,
+        policy_hash TEXT,
+        guardrail_decision_json TEXT,
         FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
         FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
       );
@@ -326,6 +329,9 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_messages_conversation ON chat_messages (conversation_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_actions_tenant_status ON queued_actions (tenant_id, status, created_at);
       CREATE INDEX IF NOT EXISTS idx_actions_site ON queued_actions (site_id, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_tenant_site_idempotency
+        ON queued_actions (tenant_id, site_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_audit_tenant_site ON audit_logs (tenant_id, site_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_tokens_tenant_status_type ON auth_tokens (tenant_id, status, token_type, created_at);
       CREATE INDEX IF NOT EXISTS idx_tokens_prefix_status ON auth_tokens (token_prefix, status);
@@ -345,6 +351,9 @@ export class SqliteStore {
       `ALTER TABLE stripe_webhook_events ADD COLUMN status TEXT NOT NULL DEFAULT 'processed'`,
       `ALTER TABLE stripe_webhook_events ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'`,
       `ALTER TABLE stripe_webhook_events ADD COLUMN error_message TEXT`,
+      `ALTER TABLE queued_actions ADD COLUMN idempotency_key TEXT`,
+      `ALTER TABLE queued_actions ADD COLUMN policy_hash TEXT`,
+      `ALTER TABLE queued_actions ADD COLUMN guardrail_decision_json TEXT`,
     ];
     for (const statement of alterStatements) {
       try {
@@ -490,6 +499,9 @@ export class SqliteStore {
     site_id: string;
     tenant_id: string;
     status?: ActionStatus;
+    idempotency_key?: string | null;
+    policy_hash?: string | null;
+    guardrail_decision?: Record<string, unknown> | null;
   }): QueuedActionRecord {
     const now = new Date().toISOString();
     const status = input.status ?? 'pending';
@@ -498,8 +510,8 @@ export class SqliteStore {
         `
         INSERT INTO queued_actions (
           id, conversation_id, site_id, tenant_id, type, description, risk, requires_confirmation, args_json,
-          status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          status, created_at, updated_at, idempotency_key, policy_hash, guardrail_decision_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       )
       .run(
@@ -515,6 +527,9 @@ export class SqliteStore {
         status,
         now,
         now,
+        input.idempotency_key ?? null,
+        input.policy_hash ?? null,
+        input.guardrail_decision ? JSON.stringify(input.guardrail_decision) : null,
       );
 
     const row = this.db.prepare(`SELECT * FROM queued_actions WHERE id = ?`).get(input.action.id) as
@@ -558,6 +573,28 @@ export class SqliteStore {
 
   getAction(id: string): QueuedActionRecord | null {
     const row = this.db.prepare(`SELECT * FROM queued_actions WHERE id = ?`).get(id) as SqlRow | undefined;
+    if (!row) {
+      return null;
+    }
+    return this.mapQueuedAction(row);
+  }
+
+  getActionByIdempotency(input: {
+    tenant_id: string;
+    site_id: string;
+    idempotency_key: string;
+  }): QueuedActionRecord | null {
+    const row = this.db
+      .prepare(
+        `
+        SELECT * FROM queued_actions
+        WHERE tenant_id = ? AND site_id = ? AND idempotency_key = ?
+          AND status IN ('pending', 'approved', 'executed')
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,
+      )
+      .get(input.tenant_id, input.site_id, input.idempotency_key) as SqlRow | undefined;
     if (!row) {
       return null;
     }
@@ -1436,6 +1473,8 @@ export class SqliteStore {
     const args = parseJsonObject(row.args_json);
     const executeResult =
       typeof row.execute_result_json === 'string' ? parseJsonObject(row.execute_result_json) : null;
+    const guardrailDecision =
+      typeof row.guardrail_decision_json === 'string' ? parseJsonObject(row.guardrail_decision_json) : null;
     return {
       id: String(row.id ?? ''),
       conversation_id: String(row.conversation_id ?? ''),
@@ -1454,6 +1493,9 @@ export class SqliteStore {
       executed_by: row.executed_by ? String(row.executed_by) : null,
       executed_at: row.executed_at ? String(row.executed_at) : null,
       execute_result: executeResult,
+      idempotency_key: row.idempotency_key ? String(row.idempotency_key) : null,
+      policy_hash: row.policy_hash ? String(row.policy_hash) : null,
+      guardrail_decision: guardrailDecision,
     };
   }
 

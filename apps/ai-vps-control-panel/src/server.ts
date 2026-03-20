@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { planAgentResponse } from './agent/planner.js';
 import { authenticate, isAllowed } from './auth/apiKeys.js';
 import { defaultRotateAfterIso, issueTokenSecret, rotateStoredToken } from './auth/tokenLifecycle.js';
@@ -517,6 +517,34 @@ function enforceManualQueueGuardrails(
   }
 
   return { ok: true };
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => stableValue(item));
+  }
+  if (typeof value === 'object' && value !== null) {
+    const source = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(source).sort((a, b) => a.localeCompare(b))) {
+      out[key] = stableValue(source[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
+function policyHashForTemplates(templates: PolicyTemplateRecord[]): string {
+  const normalized = templates
+    .map((template) => ({
+      id: template.id,
+      name: template.name,
+      category: template.category,
+      config: stableValue(template.config),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const jsonValue = JSON.stringify(normalized);
+  return createHash('sha256').update(jsonValue).digest('hex');
 }
 
 function parseTokenType(value: unknown): TokenType {
@@ -2412,29 +2440,15 @@ async function route(
           : `Manual action: ${actionType}`,
       risk: parseRiskLevel((rawAction as Record<string, unknown>).risk),
       requires_confirmation: parseBoolean((rawAction as Record<string, unknown>).requires_confirmation, false),
-      args: {
-        ...(actionArgs as Record<string, string | number | boolean>),
-        ...(idempotencyKey !== '' ? { __idempotency_key: idempotencyKey } : {}),
-      },
+      args: actionArgs as Record<string, string | number | boolean>,
     };
 
     if (idempotencyKey !== '') {
-      const existing = store
-        .listActions({
-          tenant_id: site.tenant_id,
-          site_id: site.id,
-        })
-        .find((item) => {
-          const value = item.args.__idempotency_key;
-          if (typeof value !== 'string' || value.trim() === '') {
-            return false;
-          }
-          if (value.trim() !== idempotencyKey) {
-            return false;
-          }
-          return item.status === 'pending' || item.status === 'approved' || item.status === 'executed';
-        });
-
+      const existing = store.getActionByIdempotency({
+        tenant_id: site.tenant_id,
+        site_id: site.id,
+        idempotency_key: idempotencyKey,
+      });
       if (existing) {
         return json(200, {
           ok: true,
@@ -2452,6 +2466,7 @@ async function route(
     const templates = bindings
       .map((binding) => store.getPolicyTemplate(binding.template_id))
       .filter((item): item is PolicyTemplateRecord => Boolean(item));
+    const policyHash = policyHashForTemplates(templates);
     const guardrail = enforceManualQueueGuardrails(action, templates);
     if (!guardrail.ok) {
       return json(403, {
@@ -2485,6 +2500,12 @@ async function route(
       conversation_id: conversation.id,
       site_id: site.id,
       tenant_id: site.tenant_id,
+      idempotency_key: idempotencyKey === '' ? null : idempotencyKey,
+      policy_hash: policyHash,
+      guardrail_decision: {
+        ok: true,
+        evaluated_templates: templates.map((item) => item.id),
+      },
     });
     store.addAuditLog({
       tenant_id: site.tenant_id,
@@ -2567,6 +2588,29 @@ async function route(
       }
       if (action.status !== 'approved' && action.risk !== 'low') {
         return json(409, { ok: false, error: 'action_not_approved' });
+      }
+
+      if (action.policy_hash) {
+        const bindings = store.listSitePolicyBindings({
+          tenant_id: action.tenant_id,
+          site_id: action.site_id,
+          limit: 200,
+        });
+        const templates = bindings
+          .map((binding) => store.getPolicyTemplate(binding.template_id))
+          .filter((item): item is PolicyTemplateRecord => Boolean(item));
+        const currentPolicyHash = policyHashForTemplates(templates);
+        if (currentPolicyHash !== action.policy_hash) {
+          return json(409, {
+            ok: false,
+            error: 'action_policy_changed_requires_reapproval',
+            details: {
+              action_id: action.id,
+              queued_policy_hash: action.policy_hash,
+              current_policy_hash: currentPolicyHash,
+            },
+          });
+        }
       }
 
       const parsed = await parseObjectBody(req);

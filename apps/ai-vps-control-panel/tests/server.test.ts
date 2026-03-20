@@ -1043,9 +1043,15 @@ describe('ai vps control panel api', () => {
       },
       body: JSON.stringify(payload),
     });
-    const firstBody = (await firstRes.json()) as { ok: boolean; action: { id: string } };
+    const firstBody = (await firstRes.json()) as {
+      ok: boolean;
+      action: { id: string; idempotency_key: string | null; policy_hash: string | null };
+    };
     expect(firstRes.status).toBe(201);
     expect(firstBody.ok).toBe(true);
+    expect(firstBody.action.idempotency_key).toBe('idempotency-test-key-1');
+    expect(typeof firstBody.action.policy_hash).toBe('string');
+    expect((firstBody.action.policy_hash ?? '').length).toBeGreaterThan(0);
 
     const secondRes = await fetch(`${baseUrl}/api/actions/queue`, {
       method: 'POST',
@@ -1060,6 +1066,136 @@ describe('ai vps control panel api', () => {
     expect(secondBody.ok).toBe(true);
     expect(secondBody.deduped).toBe(true);
     expect(secondBody.action.id).toBe(firstBody.action.id);
+  });
+
+  it('blocks queued action execution when policy hash drifts after approval', async () => {
+    const createSiteRes = await fetch(`${baseUrl}/api/sites`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'policy-drift-site',
+        tenant_id: 'tenant-a',
+        domain: 'policy-drift.example.com',
+        panel_type: 'ai_vps_panel',
+        runtime_type: 'php_generic',
+      }),
+    });
+    expect(createSiteRes.status).toBe(201);
+
+    const createPolicyRes = await fetch(`${baseUrl}/api/fleet/policies`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'Drift Policy',
+        category: 'operations',
+        description: 'used for policy hash drift test',
+        config: {
+          manual_queue: {
+            allowed_action_types: ['run_site_snapshot'],
+            max_risk: 'medium',
+            require_confirmation_for: ['run_site_snapshot'],
+          },
+        },
+      }),
+    });
+    const createPolicyBody = (await createPolicyRes.json()) as { ok: boolean; template: { id: string } };
+    expect(createPolicyRes.status).toBe(201);
+    expect(createPolicyBody.ok).toBe(true);
+
+    const applyPolicyRes = await fetch(
+      `${baseUrl}/api/fleet/policies/${encodeURIComponent(createPolicyBody.template.id)}/apply`,
+      {
+        method: 'POST',
+        headers: {
+          ...authHeaders('admin-a'),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          site_ids: ['policy-drift-site'],
+          status: 'active',
+        }),
+      },
+    );
+    expect(applyPolicyRes.status).toBe(200);
+
+    const queueRes = await fetch(`${baseUrl}/api/actions/queue`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        site_id: 'policy-drift-site',
+        action: {
+          type: 'run_site_snapshot',
+          description: 'snapshot awaiting policy drift',
+          risk: 'medium',
+          requires_confirmation: true,
+          args: {
+            site: 'policy-drift-site',
+            site_path: '/tmp/policy-drift-site',
+            output_dir: '/tmp',
+          },
+        },
+      }),
+    });
+    const queueBody = (await queueRes.json()) as { ok: boolean; action: { id: string; policy_hash: string | null } };
+    expect(queueRes.status).toBe(201);
+    expect(queueBody.ok).toBe(true);
+    expect(typeof queueBody.action.policy_hash).toBe('string');
+
+    const approveRes = await fetch(`${baseUrl}/api/actions/${encodeURIComponent(queueBody.action.id)}/approve`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    });
+    expect(approveRes.status).toBe(200);
+
+    const mutatePolicyRes = await fetch(`${baseUrl}/api/fleet/policies`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: createPolicyBody.template.id,
+        name: 'Drift Policy',
+        category: 'operations',
+        description: 'mutated',
+        config: {
+          manual_queue: {
+            allowed_action_types: ['verify_site_upgrade'],
+            max_risk: 'low',
+          },
+        },
+      }),
+    });
+    expect(mutatePolicyRes.status).toBe(201);
+
+    const executeRes = await fetch(`${baseUrl}/api/actions/${encodeURIComponent(queueBody.action.id)}/execute`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        dry_run: false,
+        confirmed: true,
+      }),
+    });
+    const executeBody = (await executeRes.json()) as { ok: boolean; error: string };
+    expect(executeRes.status).toBe(409);
+    expect(executeBody.ok).toBe(false);
+    expect(executeBody.error).toBe('action_policy_changed_requires_reapproval');
   });
 
   it('enforces manual queue guardrails from applied policy templates', async () => {

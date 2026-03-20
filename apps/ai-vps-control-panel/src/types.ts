@@ -120,6 +120,9 @@ export interface QueuedActionRecord {
   executed_by: string | null;
   executed_at: string | null;
   execute_result: Record<string, unknown> | null;
+  idempotency_key: string | null;
+  policy_hash: string | null;
+  guardrail_decision: Record<string, unknown> | null;
 }
 
 export interface AuditLogRecord {
