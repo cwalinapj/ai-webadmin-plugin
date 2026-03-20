@@ -21,6 +21,23 @@ const queueTableBody = document.querySelector("#queueTableBody");
 
 const loadAuditBtn = document.querySelector("#loadAuditBtn");
 const auditList = document.querySelector("#auditList");
+const hostOpsForm = document.querySelector("#hostOpsForm");
+const hostOpsSiteSelect = document.querySelector("#hostOpsSiteSelect");
+const hostOpsActionType = document.querySelector("#hostOpsActionType");
+const hostOpsSitePath = document.querySelector("#hostOpsSitePath");
+const hostOpsOutputDir = document.querySelector("#hostOpsOutputDir");
+const hostOpsFromVersion = document.querySelector("#hostOpsFromVersion");
+const hostOpsToVersion = document.querySelector("#hostOpsToVersion");
+const hostOpsVerifyUrl = document.querySelector("#hostOpsVerifyUrl");
+const hostOpsExpectFiles = document.querySelector("#hostOpsExpectFiles");
+const hostOpsSnapshotPath = document.querySelector("#hostOpsSnapshotPath");
+const hostOpsTargetPath = document.querySelector("#hostOpsTargetPath");
+const hostOpsSecretName = document.querySelector("#hostOpsSecretName");
+const hostOpsSecretPrefix = document.querySelector("#hostOpsSecretPrefix");
+const hostOpsSecretLength = document.querySelector("#hostOpsSecretLength");
+const hostOpsDryRunBtn = document.querySelector("#hostOpsDryRunBtn");
+const hostOpsLiveBtn = document.querySelector("#hostOpsLiveBtn");
+const hostOpsOutput = document.querySelector("#hostOpsOutput");
 
 const fleetRiskWindow = document.querySelector("#fleetRiskWindow");
 const loadFleetRiskBtn = document.querySelector("#loadFleetRiskBtn");
@@ -123,6 +140,7 @@ function syncSiteSelectors(sites) {
   clear(chatSiteSelect);
   clear(policyApplySiteSelect);
   clear(billingSiteSelect);
+  clear(hostOpsSiteSelect);
 
   if (policyApplySiteSelect) {
     policyApplySiteSelect.appendChild(makeOption("__ALL__", "All Sites"));
@@ -137,6 +155,9 @@ function syncSiteSelectors(sites) {
     }
     if (billingSiteSelect) {
       billingSiteSelect.appendChild(makeOption(site.id, `${site.id} - ${site.domain}`));
+    }
+    if (hostOpsSiteSelect) {
+      hostOpsSiteSelect.appendChild(makeOption(site.id, `${site.id} - ${site.domain}`));
     }
   }
 }
@@ -708,6 +729,165 @@ async function submitBillingForm(event) {
   }
 }
 
+function currentHostOpsActionPayload() {
+  const siteId = hostOpsSiteSelect?.value?.trim() || "";
+  const actionType = hostOpsActionType?.value?.trim() || "";
+  const sitePath = hostOpsSitePath?.value?.trim() || "";
+  const outputValue = hostOpsOutputDir?.value?.trim() || "";
+  const fromVersion = hostOpsFromVersion?.value?.trim() || "";
+  const toVersion = hostOpsToVersion?.value?.trim() || "";
+  const verifyUrl = hostOpsVerifyUrl?.value?.trim() || "";
+  const expectFilesCsv = hostOpsExpectFiles?.value?.trim() || "";
+  const snapshotPath = hostOpsSnapshotPath?.value?.trim() || "";
+  const targetPath = hostOpsTargetPath?.value?.trim() || "";
+  const secretName = hostOpsSecretName?.value?.trim() || "";
+  const secretPrefix = hostOpsSecretPrefix?.value?.trim() || "";
+  const secretLength = Number.parseInt(hostOpsSecretLength?.value || "40", 10);
+
+  if (!siteId || !actionType) {
+    throw new Error("Site and host op action are required.");
+  }
+
+  if (actionType === "run_site_snapshot") {
+    return {
+      site_id: siteId,
+      action: {
+        id: crypto.randomUUID(),
+        type: "run_site_snapshot",
+        description: `Snapshot ${siteId}`,
+        risk: "medium",
+        requires_confirmation: true,
+        args: {
+          site: siteId,
+          site_path: sitePath || `/var/www/${siteId}`,
+          output_dir: outputValue || "/var/backups/ai-webadmin",
+        },
+      },
+    };
+  }
+
+  if (actionType === "verify_site_upgrade") {
+    return {
+      site_id: siteId,
+      action: {
+        id: crypto.randomUUID(),
+        type: "verify_site_upgrade",
+        description: `Verify ${siteId}`,
+        risk: "medium",
+        requires_confirmation: false,
+        args: {
+          site: siteId,
+          site_path: sitePath || `/var/www/${siteId}`,
+          url: verifyUrl || "",
+          expect_files_csv: expectFilesCsv || `${sitePath || `/var/www/${siteId}`}/index.php`,
+        },
+      },
+    };
+  }
+
+  if (actionType === "plan_site_upgrade") {
+    return {
+      site_id: siteId,
+      action: {
+        id: crypto.randomUUID(),
+        type: "plan_site_upgrade",
+        description: `Plan upgrade for ${siteId}`,
+        risk: "medium",
+        requires_confirmation: false,
+        args: {
+          site: siteId,
+          site_path: sitePath || `/var/www/${siteId}`,
+          from_version: fromVersion || "",
+          to_version: toVersion || "",
+          output_path: outputValue || `/var/lib/ai-webadmin/plans/${siteId}.plan`,
+        },
+      },
+    };
+  }
+
+  if (actionType === "rollback_site_upgrade") {
+    return {
+      site_id: siteId,
+      action: {
+        id: crypto.randomUUID(),
+        type: "rollback_site_upgrade",
+        description: `Rollback ${siteId} from snapshot`,
+        risk: "high",
+        requires_confirmation: true,
+        args: {
+          snapshot_path: snapshotPath,
+          target_path: targetPath || sitePath || `/var/www/${siteId}`,
+          backup_dir: outputValue || "/var/backups/ai-webadmin/rollback",
+        },
+      },
+    };
+  }
+
+  if (actionType === "rotate_secret") {
+    return {
+      site_id: siteId,
+      action: {
+        id: crypto.randomUUID(),
+        type: "rotate_secret",
+        description: `Rotate secret for ${siteId}`,
+        risk: "high",
+        requires_confirmation: true,
+        args: {
+          name: secretName || "API_TOKEN",
+          write_env_file: outputValue || "/run/ai-vps-control-panel/runtime.env",
+          prefix: secretPrefix || "tok_",
+          length: Number.isFinite(secretLength) ? secretLength : 40,
+        },
+      },
+    };
+  }
+
+  throw new Error("Unsupported host op action.");
+}
+
+async function queueHostOpsAction(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  try {
+    const payload = currentHostOpsActionPayload();
+    const result = await api("/api/actions/queue", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    text(hostOpsOutput, JSON.stringify(result, null, 2));
+    await loadQueue();
+    await loadAudit();
+    await loadFleetRisk();
+  } catch (error) {
+    text(hostOpsOutput, `Error: ${error.message}`);
+  }
+}
+
+async function runHostOpsAction(event, dryRun) {
+  if (event) {
+    event.preventDefault();
+  }
+  try {
+    const payload = currentHostOpsActionPayload();
+    const result = await api("/api/agent/execute", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...payload,
+        dry_run: dryRun,
+        confirmed: true,
+      }),
+    });
+    text(hostOpsOutput, JSON.stringify(result, null, 2));
+    await loadAudit();
+    await loadQueue();
+  } catch (error) {
+    text(hostOpsOutput, `Error: ${error.message}`);
+  }
+}
+
 async function refreshAll() {
   try {
     await loadSession();
@@ -734,6 +914,9 @@ loginBtn.addEventListener("click", loginSession);
 logoutBtn.addEventListener("click", logoutSession);
 siteForm.addEventListener("submit", submitSiteForm);
 chatForm.addEventListener("submit", sendChatMessage);
+hostOpsForm?.addEventListener("submit", queueHostOpsAction);
+hostOpsDryRunBtn?.addEventListener("click", (event) => runHostOpsAction(event, true));
+hostOpsLiveBtn?.addEventListener("click", (event) => runHostOpsAction(event, false));
 policyForm.addEventListener("submit", submitPolicyForm);
 billingForm.addEventListener("submit", submitBillingForm);
 loadQueueBtn.addEventListener("click", loadQueue);

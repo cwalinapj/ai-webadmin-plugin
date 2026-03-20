@@ -18,6 +18,13 @@ function scriptPath(envName: string, fallback: string): string {
   return value === '' ? fallback : value;
 }
 
+function pathStartsWithAllowedPrefix(value: string, prefixes: string[]): boolean {
+  return prefixes.some((prefix) => {
+    const normalized = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
+    return value === normalized || value.startsWith(prefix);
+  });
+}
+
 async function defaultExec(bin: string, args: string[], timeoutMs: number): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve) => {
     execFile(bin, args, { timeout: timeoutMs }, (error, stdout, stderr) => {
@@ -129,15 +136,142 @@ export class SafeCommandExecutor {
     }
 
     if (action.type === 'run_site_snapshot') {
-      const sitePath = String(action.args.site_path ?? '/var/www');
-      const outputPath = String(action.args.output_path ?? '/var/backups/site-snapshot.tgz');
-      if (!sitePath.startsWith('/var/www')) {
+      const site = String(action.args.site ?? '').trim().toLowerCase();
+      if (site === '' || !SITE_VALUE_REGEX.test(site)) {
+        return { ok: false, error: 'invalid_site' };
+      }
+
+      const sitePath = String(action.args.site_path ?? '').trim();
+      if (sitePath === '' || !pathStartsWithAllowedPrefix(sitePath, ['/var/www/', '/srv/www/', '/tmp/'])) {
         return { ok: false, error: 'site_path_not_allowed' };
       }
-      if (!outputPath.startsWith('/var/backups/')) {
+
+      const outputDir = String(action.args.output_dir ?? '/var/backups/ai-webadmin').trim();
+      if (!pathStartsWithAllowedPrefix(outputDir, ['/var/backups/', '/tmp/'])) {
+        return { ok: false, error: 'output_dir_not_allowed' };
+      }
+
+      return {
+        ok: true,
+        value: {
+          bin: scriptPath('AI_VPS_SNAPSHOT_SCRIPT_PATH', '/root/snapshot-site.sh'),
+          args: ['--site', site, '--site-path', sitePath, '--output-dir', outputDir],
+        },
+      };
+    }
+
+    if (action.type === 'plan_site_upgrade') {
+      const site = String(action.args.site ?? '').trim().toLowerCase();
+      if (site === '' || !SITE_VALUE_REGEX.test(site)) {
+        return { ok: false, error: 'invalid_site' };
+      }
+
+      const sitePath = String(action.args.site_path ?? '').trim();
+      if (sitePath === '' || !pathStartsWithAllowedPrefix(sitePath, ['/var/www/', '/srv/www/', '/tmp/'])) {
+        return { ok: false, error: 'site_path_not_allowed' };
+      }
+
+      const outputPath = String(action.args.output_path ?? '').trim();
+      if (outputPath !== '' && !pathStartsWithAllowedPrefix(outputPath, ['/var/lib/ai-webadmin/', '/tmp/'])) {
         return { ok: false, error: 'output_path_not_allowed' };
       }
-      return { ok: true, value: { bin: 'tar', args: ['-czf', outputPath, sitePath] } };
+
+      const fromVersion = String(action.args.from_version ?? '').trim();
+      const toVersion = String(action.args.to_version ?? '').trim();
+      const args: string[] = ['--site', site, '--site-path', sitePath];
+      if (fromVersion !== '') {
+        args.push('--from-version', fromVersion);
+      }
+      if (toVersion !== '') {
+        args.push('--to-version', toVersion);
+      }
+      if (outputPath !== '') {
+        args.push('--output-path', outputPath);
+      }
+
+      return {
+        ok: true,
+        value: {
+          bin: scriptPath('AI_VPS_PLAN_UPGRADE_SCRIPT_PATH', '/root/plan-upgrade.sh'),
+          args,
+        },
+      };
+    }
+
+    if (action.type === 'verify_site_upgrade') {
+      const site = String(action.args.site ?? '').trim().toLowerCase();
+      if (site === '' || !SITE_VALUE_REGEX.test(site)) {
+        return { ok: false, error: 'invalid_site' };
+      }
+
+      const args: string[] = ['--site', site];
+      const sitePath = String(action.args.site_path ?? '').trim();
+      if (sitePath !== '') {
+        if (!pathStartsWithAllowedPrefix(sitePath, ['/var/www/', '/srv/www/', '/tmp/'])) {
+          return { ok: false, error: 'site_path_not_allowed' };
+        }
+        args.push('--site-path', sitePath);
+      }
+
+      const expectFilesCsv = String(action.args.expect_files_csv ?? '').trim();
+      if (expectFilesCsv !== '') {
+        const files = expectFilesCsv
+          .split(',')
+          .map((item) => item.trim())
+          .filter((item) => item !== '');
+        for (const file of files) {
+          if (!pathStartsWithAllowedPrefix(file, ['/var/www/', '/srv/www/', '/tmp/'])) {
+            return { ok: false, error: 'expect_file_not_allowed' };
+          }
+          args.push('--expect-file', file);
+        }
+      }
+
+      const url = String(action.args.url ?? '').trim();
+      if (url !== '') {
+        if (!/^https?:\/\//.test(url)) {
+          return { ok: false, error: 'invalid_url' };
+        }
+        args.push('--url', url);
+      }
+
+      return {
+        ok: true,
+        value: {
+          bin: scriptPath('AI_VPS_VERIFY_UPGRADE_SCRIPT_PATH', '/root/verify-upgrade.sh'),
+          args,
+        },
+      };
+    }
+
+    if (action.type === 'rollback_site_upgrade') {
+      const snapshotPath = String(action.args.snapshot_path ?? '').trim();
+      if (snapshotPath === '' || !pathStartsWithAllowedPrefix(snapshotPath, ['/var/backups/', '/tmp/'])) {
+        return { ok: false, error: 'snapshot_path_not_allowed' };
+      }
+
+      const targetPath = String(action.args.target_path ?? '').trim();
+      if (targetPath === '' || !pathStartsWithAllowedPrefix(targetPath, ['/var/www/', '/srv/www/', '/tmp/'])) {
+        return { ok: false, error: 'target_path_not_allowed' };
+      }
+
+      const backupDir = String(action.args.backup_dir ?? '').trim();
+      if (backupDir !== '' && !pathStartsWithAllowedPrefix(backupDir, ['/var/backups/', '/tmp/'])) {
+        return { ok: false, error: 'backup_dir_not_allowed' };
+      }
+
+      const args: string[] = ['--snapshot-path', snapshotPath, '--target-path', targetPath];
+      if (backupDir !== '') {
+        args.push('--backup-dir', backupDir);
+      }
+
+      return {
+        ok: true,
+        value: {
+          bin: scriptPath('AI_VPS_ROLLBACK_UPGRADE_SCRIPT_PATH', '/root/rollback-upgrade.sh'),
+          args,
+        },
+      };
     }
 
     if (action.type === 'run_security_scan') {
@@ -166,6 +300,38 @@ export class SafeCommandExecutor {
         ok: true,
         value: {
           bin: scriptPath('AI_VPS_RUN_SECURITY_SCAN_SCRIPT_PATH', '/root/run-security-scan.sh'),
+          args,
+        },
+      };
+    }
+
+    if (action.type === 'rotate_secret') {
+      const name = String(action.args.name ?? '').trim().toUpperCase();
+      if (!/^[A-Z][A-Z0-9_]{1,63}$/.test(name)) {
+        return { ok: false, error: 'invalid_secret_name' };
+      }
+
+      const args: string[] = ['--name', name];
+      const writeEnvFile = String(action.args.write_env_file ?? '').trim();
+      if (writeEnvFile !== '') {
+        if (!pathStartsWithAllowedPrefix(writeEnvFile, ['/etc/', '/run/', '/var/lib/ai-webadmin/', '/tmp/'])) {
+          return { ok: false, error: 'env_file_not_allowed' };
+        }
+        args.push('--write-env-file', writeEnvFile);
+      }
+
+      const prefix = String(action.args.prefix ?? '').trim();
+      if (prefix !== '') {
+        args.push('--prefix', prefix);
+      }
+
+      const length = boundedInteger(action.args.length, 40, 12, 256);
+      args.push('--length', String(length));
+
+      return {
+        ok: true,
+        value: {
+          bin: scriptPath('AI_VPS_ROTATE_SECRETS_SCRIPT_PATH', '/root/rotate-secrets.sh'),
           args,
         },
       };

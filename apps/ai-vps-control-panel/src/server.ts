@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { planAgentResponse } from './agent/planner.js';
 import { authenticate, isAllowed } from './auth/apiKeys.js';
 import { defaultRotateAfterIso, issueTokenSecret, rotateStoredToken } from './auth/tokenLifecycle.js';
@@ -12,12 +12,14 @@ import { createStore } from './store/index.js';
 import type {
   ActionStatus,
   AgentAction,
+  AgentActionType,
   ApiPrincipal,
   AuthTokenRecord,
   BillingStatus,
   ChatRequest,
   ExecuteActionRequest,
   QueuedActionRecord,
+  RiskLevel,
   Role,
   SitePolicyBindingRecord,
   SiteRecord,
@@ -296,6 +298,37 @@ function parseActionStatus(value: unknown): ActionStatus | undefined {
     return raw;
   }
   return undefined;
+}
+
+function parseRiskLevel(value: unknown): RiskLevel {
+  if (value === 'low' || value === 'medium' || value === 'high') {
+    return value;
+  }
+  return 'medium';
+}
+
+function parseActionType(value: unknown): AgentActionType | null {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (raw === '') {
+    return null;
+  }
+  const allowed = new Set<AgentActionType>([
+    'check_service_status',
+    'restart_service',
+    'tail_service_logs',
+    'run_site_snapshot',
+    'plan_site_upgrade',
+    'verify_site_upgrade',
+    'rollback_site_upgrade',
+    'run_security_scan',
+    'rotate_secret',
+    'switch_load_balancer_mode',
+    'noop',
+  ]);
+  if (!allowed.has(raw as AgentActionType)) {
+    return null;
+  }
+  return raw as AgentActionType;
 }
 
 function parseTokenType(value: unknown): TokenType {
@@ -2130,6 +2163,100 @@ async function route(
       conversation_id: conversationId,
     });
     return json(200, { ok: true, actions });
+  }
+
+  if (method === 'POST' && pathname === '/api/actions/queue') {
+    const principal = await authorize(req, store, 'operator', context);
+    if (!principal) {
+      return json(403, { ok: false, error: 'forbidden' });
+    }
+
+    const parsed = await parseObjectBody(req);
+    if (!parsed.ok) {
+      return json(400, { ok: false, error: parsed.error });
+    }
+    const body = parsed.body;
+
+    const siteId = typeof body.site_id === 'string' ? body.site_id.trim() : '';
+    const rawAction = typeof body.action === 'object' && body.action !== null ? body.action : null;
+    if (siteId === '' || !rawAction) {
+      return json(400, { ok: false, error: 'missing_site_or_action' });
+    }
+
+    const site = store.getSite(siteId);
+    if (!site) {
+      return json(404, { ok: false, error: 'site_not_found' });
+    }
+    if (!siteAllowed(principal, site)) {
+      return json(403, { ok: false, error: 'tenant_scope_violation' });
+    }
+
+    const actionType = parseActionType((rawAction as Record<string, unknown>).type);
+    if (!actionType) {
+      return json(400, { ok: false, error: 'invalid_action_type' });
+    }
+
+    const actionArgs = parseJsonObjectValue((rawAction as Record<string, unknown>).args);
+    const action: AgentAction = {
+      id:
+        typeof (rawAction as Record<string, unknown>).id === 'string' &&
+        ((rawAction as Record<string, unknown>).id as string).trim() !== ''
+          ? ((rawAction as Record<string, unknown>).id as string).trim()
+          : randomUUID(),
+      type: actionType,
+      description:
+        typeof (rawAction as Record<string, unknown>).description === 'string' &&
+        ((rawAction as Record<string, unknown>).description as string).trim() !== ''
+          ? ((rawAction as Record<string, unknown>).description as string).trim()
+          : `Manual action: ${actionType}`,
+      risk: parseRiskLevel((rawAction as Record<string, unknown>).risk),
+      requires_confirmation: parseBoolean((rawAction as Record<string, unknown>).requires_confirmation, false),
+      args: actionArgs as Record<string, string | number | boolean>,
+    };
+
+    const preview = await executor.execute(action, {
+      dryRun: true,
+      confirmed: true,
+    });
+    if (!preview.ok) {
+      return json(400, { ok: false, error: 'invalid_action', details: preview.blocked_reason ?? 'invalid_action' });
+    }
+
+    const conversation = store.createConversation({
+      site_id: site.id,
+      tenant_id: site.tenant_id,
+      last_message: `Manual queue action: ${action.type}`,
+    });
+    store.addChatMessage({
+      conversation_id: conversation.id,
+      role: 'system',
+      content: `Queued via console host ops: ${action.description}`,
+    });
+
+    const queuedAction = store.enqueueAction({
+      action,
+      conversation_id: conversation.id,
+      site_id: site.id,
+      tenant_id: site.tenant_id,
+    });
+    store.addAuditLog({
+      tenant_id: site.tenant_id,
+      site_id: site.id,
+      actor: principal.token,
+      event_type: 'action.queued_manual',
+      payload: {
+        action_id: queuedAction.id,
+        type: queuedAction.type,
+        conversation_id: conversation.id,
+      },
+    });
+
+    return json(201, {
+      ok: true,
+      action: queuedAction,
+      conversation_id: conversation.id,
+      preview,
+    });
   }
 
   if (method === 'GET' && pathname === '/api/audit') {

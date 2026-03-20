@@ -79,6 +79,37 @@
       </section>
 
       <section class="panel">
+        <h2>Host Ops</h2>
+        <form id="hostOpsForm" class="form">
+          <select id="hostOpsSiteSelect" name="site_id" required></select>
+          <select id="hostOpsActionType" name="action_type" required>
+            <option value="run_site_snapshot">Snapshot Site</option>
+            <option value="plan_site_upgrade">Plan Upgrade</option>
+            <option value="verify_site_upgrade">Verify Site</option>
+            <option value="rollback_site_upgrade">Rollback Upgrade</option>
+            <option value="rotate_secret">Rotate Secret</option>
+          </select>
+          <input id="hostOpsSitePath" name="site_path" placeholder="/var/www/example.com" />
+          <input id="hostOpsOutputDir" name="output_dir" placeholder="/var/backups/ai-webadmin or /tmp/runtime.env or /var/lib/ai-webadmin/..." />
+          <input id="hostOpsFromVersion" name="from_version" placeholder="6.5.5 (plan only)" />
+          <input id="hostOpsToVersion" name="to_version" placeholder="6.6.1 (plan only)" />
+          <input id="hostOpsVerifyUrl" name="verify_url" placeholder="https://example.com/health (verify only)" />
+          <input id="hostOpsExpectFiles" name="expect_files_csv" placeholder="/var/www/example.com/index.php,/tmp/check.txt" />
+          <input id="hostOpsSnapshotPath" name="snapshot_path" placeholder="/var/backups/...tgz (rollback only)" />
+          <input id="hostOpsTargetPath" name="target_path" placeholder="/var/www/example.com (rollback only)" />
+          <input id="hostOpsSecretName" name="secret_name" placeholder="API_TOKEN (rotate only)" />
+          <input id="hostOpsSecretPrefix" name="secret_prefix" placeholder="tok_ (rotate only)" />
+          <input id="hostOpsSecretLength" name="secret_length" type="number" min="12" max="256" value="40" />
+          <div class="inline-controls">
+            <button id="hostOpsQueueBtn" type="submit">Queue For Approval</button>
+            <button id="hostOpsDryRunBtn" type="button">Run Dry</button>
+            <button id="hostOpsLiveBtn" type="button" class="secondary">Run Live</button>
+          </div>
+        </form>
+        <div id="hostOpsOutput" class="output"></div>
+      </section>
+
+      <section class="panel">
         <h2>Audit</h2>
         <button id="loadAuditBtn" type="button">Load Audit</button>
         <ul id="auditList" class="list"></ul>

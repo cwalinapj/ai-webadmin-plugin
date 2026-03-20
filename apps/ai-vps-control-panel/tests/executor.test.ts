@@ -109,4 +109,121 @@ describe('safe command executor', () => {
     expect(result.command?.args).toContain('--path');
     expect(result.command?.args).toContain('/var/www/example.com');
   });
+
+  it('builds snapshot command through host script path', async () => {
+    process.env.AI_VPS_SNAPSHOT_SCRIPT_PATH = '/tmp/snapshot-site.sh';
+    const executor = new SafeCommandExecutor();
+    const action: AgentAction = {
+      id: 'a6',
+      type: 'run_site_snapshot',
+      description: 'snapshot site',
+      risk: 'medium',
+      requires_confirmation: true,
+      args: {
+        site: 'example.com',
+        site_path: '/var/www/example.com',
+        output_dir: '/tmp/backups',
+      },
+    };
+
+    const result = await executor.execute(action, { dryRun: true, confirmed: true });
+    expect(result.ok).toBe(true);
+    expect(result.command?.bin).toBe('/tmp/snapshot-site.sh');
+    expect(result.command?.args).toEqual(['--site', 'example.com', '--site-path', '/var/www/example.com', '--output-dir', '/tmp/backups']);
+  });
+
+  it('builds verify upgrade command with expected files', async () => {
+    process.env.AI_VPS_VERIFY_UPGRADE_SCRIPT_PATH = '/tmp/verify-upgrade.sh';
+    const executor = new SafeCommandExecutor();
+    const action: AgentAction = {
+      id: 'a7',
+      type: 'verify_site_upgrade',
+      description: 'verify site',
+      risk: 'medium',
+      requires_confirmation: false,
+      args: {
+        site: 'example.com',
+        site_path: '/var/www/example.com',
+        expect_files_csv: '/var/www/example.com/index.php,/tmp/check.txt',
+        url: 'https://example.com/health',
+      },
+    };
+
+    const result = await executor.execute(action, { dryRun: true, confirmed: true });
+    expect(result.ok).toBe(true);
+    expect(result.command?.bin).toBe('/tmp/verify-upgrade.sh');
+    expect(result.command?.args).toContain('--expect-file');
+    expect(result.command?.args).toContain('/tmp/check.txt');
+  });
+
+  it('builds rotate secret command with guarded env file', async () => {
+    process.env.AI_VPS_ROTATE_SECRETS_SCRIPT_PATH = '/tmp/rotate-secrets.sh';
+    const executor = new SafeCommandExecutor();
+    const action: AgentAction = {
+      id: 'a8',
+      type: 'rotate_secret',
+      description: 'rotate runtime secret',
+      risk: 'high',
+      requires_confirmation: true,
+      args: {
+        name: 'API_TOKEN',
+        write_env_file: '/tmp/runtime.env',
+        prefix: 'tok_',
+        length: 48,
+      },
+    };
+
+    const result = await executor.execute(action, { dryRun: true, confirmed: true });
+    expect(result.ok).toBe(true);
+    expect(result.command?.bin).toBe('/tmp/rotate-secrets.sh');
+    expect(result.command?.args).toContain('/tmp/runtime.env');
+  });
+
+  it('builds plan upgrade command with output path', async () => {
+    process.env.AI_VPS_PLAN_UPGRADE_SCRIPT_PATH = '/tmp/plan-upgrade.sh';
+    const executor = new SafeCommandExecutor();
+    const action: AgentAction = {
+      id: 'a9',
+      type: 'plan_site_upgrade',
+      description: 'plan upgrade',
+      risk: 'medium',
+      requires_confirmation: false,
+      args: {
+        site: 'example.com',
+        site_path: '/var/www/example.com',
+        from_version: '6.5.5',
+        to_version: '6.6.1',
+        output_path: '/tmp/upgrade.plan',
+      },
+    };
+
+    const result = await executor.execute(action, { dryRun: true, confirmed: true });
+    expect(result.ok).toBe(true);
+    expect(result.command?.bin).toBe('/tmp/plan-upgrade.sh');
+    expect(result.command?.args).toContain('--from-version');
+    expect(result.command?.args).toContain('/tmp/upgrade.plan');
+  });
+
+  it('builds rollback upgrade command with snapshot and target paths', async () => {
+    process.env.AI_VPS_ROLLBACK_UPGRADE_SCRIPT_PATH = '/tmp/rollback-upgrade.sh';
+    const executor = new SafeCommandExecutor();
+    const action: AgentAction = {
+      id: 'a10',
+      type: 'rollback_site_upgrade',
+      description: 'rollback site',
+      risk: 'high',
+      requires_confirmation: true,
+      args: {
+        snapshot_path: '/var/backups/example-snap.tgz',
+        target_path: '/var/www/example.com',
+        backup_dir: '/tmp/rollback-backups',
+      },
+    };
+
+    const result = await executor.execute(action, { dryRun: true, confirmed: true });
+    expect(result.ok).toBe(true);
+    expect(result.command?.bin).toBe('/tmp/rollback-upgrade.sh');
+    expect(result.command?.args).toContain('--snapshot-path');
+    expect(result.command?.args).toContain('/var/backups/example-snap.tgz');
+  });
 });

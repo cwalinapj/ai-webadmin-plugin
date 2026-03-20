@@ -8,6 +8,7 @@ import { createServer } from '../src/server.js';
 let server: ReturnType<typeof createServer>;
 let baseUrl = '';
 let tempScriptDir = '';
+let snapshotScriptPath = '';
 
 beforeAll(async () => {
   process.env.AI_VPS_API_KEYS = [
@@ -20,13 +21,21 @@ beforeAll(async () => {
   process.env.AI_VPS_CONSOLE_PASSWORD = 'console-pass-123';
   tempScriptDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-vps-panel-tests-'));
   const securityScanScriptPath = path.join(tempScriptDir, 'run-security-scan.sh');
+  snapshotScriptPath = path.join(tempScriptDir, 'snapshot-site.sh');
   await fs.writeFile(
     securityScanScriptPath,
     '#!/usr/bin/env bash\nset -euo pipefail\nprintf \'{"ok":true,"scan":"completed","args":"%s"}\\n\' \"$*\"\n',
     'utf8',
   );
+  await fs.writeFile(
+    snapshotScriptPath,
+    '#!/usr/bin/env bash\nset -euo pipefail\nprintf \'{"ok":true,"snapshot":"completed","args":"%s"}\\n\' \"$*\"\n',
+    'utf8',
+  );
   await fs.chmod(securityScanScriptPath, 0o755);
+  await fs.chmod(snapshotScriptPath, 0o755);
   process.env.AI_VPS_RUN_SECURITY_SCAN_SCRIPT_PATH = securityScanScriptPath;
+  process.env.AI_VPS_SNAPSHOT_SCRIPT_PATH = snapshotScriptPath;
   server = createServer();
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve());
@@ -804,6 +813,184 @@ describe('ai vps control panel api', () => {
     expect(messagesBody.ok).toBe(true);
     expect(messagesBody.messages.some((item) => item.role === 'user')).toBe(true);
     expect(messagesBody.messages.some((item) => item.role === 'assistant')).toBe(true);
+  });
+
+  it('supports queued approve and live execute flow for snapshot host primitive', async () => {
+    const createSiteRes = await fetch(`${baseUrl}/api/sites`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'queue-snapshot-site',
+        tenant_id: 'tenant-a',
+        domain: 'queue-snapshot.example.com',
+        panel_type: 'ai_vps_panel',
+        runtime_type: 'php_generic',
+      }),
+    });
+    expect(createSiteRes.status).toBe(201);
+
+    const chatRes = await fetch(`${baseUrl}/api/chat/message`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        site_id: 'queue-snapshot-site',
+        message: 'take a snapshot before changes',
+      }),
+    });
+    const chatBody = (await chatRes.json()) as {
+      ok: boolean;
+      actions: Array<{ id: string; type: string; status: string }>;
+    };
+
+    expect(chatRes.status).toBe(200);
+    expect(chatBody.ok).toBe(true);
+    expect(chatBody.actions[0]?.type).toBe('run_site_snapshot');
+    expect(chatBody.actions[0]?.status).toBe('pending');
+
+    const approveRes = await fetch(
+      `${baseUrl}/api/actions/${encodeURIComponent(chatBody.actions[0]?.id ?? '')}/approve`,
+      {
+        method: 'POST',
+        headers: {
+          ...authHeaders('admin-a'),
+          'content-type': 'application/json',
+        },
+        body: '{}',
+      },
+    );
+    expect(approveRes.status).toBe(200);
+
+    const executeRes = await fetch(
+      `${baseUrl}/api/actions/${encodeURIComponent(chatBody.actions[0]?.id ?? '')}/execute`,
+      {
+        method: 'POST',
+        headers: {
+          ...authHeaders('operator-a'),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          dry_run: false,
+          confirmed: true,
+        }),
+      },
+    );
+    const executeBody = (await executeRes.json()) as {
+      ok: boolean;
+      dry_run: boolean;
+      stdout?: string;
+      command?: { bin: string; args: string[] };
+      worker_sync?: { ok: boolean; details?: { skipped?: boolean } };
+    };
+    expect(executeRes.status).toBe(200);
+    expect(executeBody.ok).toBe(true);
+    expect(executeBody.dry_run).toBe(false);
+    expect(executeBody.command?.bin).toBe(snapshotScriptPath);
+    expect(executeBody.stdout).toContain('"snapshot":"completed"');
+    expect(executeBody.worker_sync?.ok).toBe(true);
+    expect(executeBody.worker_sync?.details?.skipped).toBe(true);
+
+    const actionsRes = await fetch(`${baseUrl}/api/actions?status=executed`, {
+      headers: authHeaders('operator-a'),
+    });
+    const actionsBody = (await actionsRes.json()) as {
+      ok: boolean;
+      actions: Array<{ id: string; status: string }>;
+    };
+    expect(actionsRes.status).toBe(200);
+    expect(actionsBody.ok).toBe(true);
+    expect(actionsBody.actions.some((item) => item.id === chatBody.actions[0]?.id && item.status === 'executed')).toBe(
+      true,
+    );
+  });
+
+  it('supports manual queue endpoint for host ops actions with approval workflow', async () => {
+    const createSiteRes = await fetch(`${baseUrl}/api/sites`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: 'manual-queue-site',
+        tenant_id: 'tenant-a',
+        domain: 'manual-queue.example.com',
+        panel_type: 'ai_vps_panel',
+        runtime_type: 'php_generic',
+      }),
+    });
+    expect(createSiteRes.status).toBe(201);
+
+    const queueRes = await fetch(`${baseUrl}/api/actions/queue`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        site_id: 'manual-queue-site',
+        action: {
+          type: 'run_site_snapshot',
+          description: 'manual queued snapshot',
+          risk: 'medium',
+          requires_confirmation: true,
+          args: {
+            site: 'manual-queue-site',
+            site_path: '/tmp/manual-queue-site',
+            output_dir: '/tmp',
+          },
+        },
+      }),
+    });
+    const queueBody = (await queueRes.json()) as {
+      ok: boolean;
+      action: { id: string; status: string; type: string };
+      preview: { ok: boolean; dry_run: boolean };
+    };
+    expect(queueRes.status).toBe(201);
+    expect(queueBody.ok).toBe(true);
+    expect(queueBody.action.type).toBe('run_site_snapshot');
+    expect(queueBody.action.status).toBe('pending');
+    expect(queueBody.preview.ok).toBe(true);
+    expect(queueBody.preview.dry_run).toBe(true);
+
+    const approveRes = await fetch(`${baseUrl}/api/actions/${encodeURIComponent(queueBody.action.id)}/approve`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('admin-a'),
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    });
+    expect(approveRes.status).toBe(200);
+
+    const executeRes = await fetch(`${baseUrl}/api/actions/${encodeURIComponent(queueBody.action.id)}/execute`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders('operator-a'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        dry_run: false,
+        confirmed: true,
+      }),
+    });
+    const executeBody = (await executeRes.json()) as {
+      ok: boolean;
+      dry_run: boolean;
+      command?: { bin: string; args: string[] };
+      stdout?: string;
+    };
+    expect(executeRes.status).toBe(200);
+    expect(executeBody.ok).toBe(true);
+    expect(executeBody.dry_run).toBe(false);
+    expect(executeBody.command?.bin).toBe(snapshotScriptPath);
+    expect(executeBody.stdout).toContain('"snapshot":"completed"');
   });
 
   it('supports fleet mode risk dashboard and policy template apply across sites', async () => {

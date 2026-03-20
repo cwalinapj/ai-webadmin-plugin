@@ -31,7 +31,7 @@ export function planAgentResponse(input: ChatRequest): ChatResponse {
   const lower = message.toLowerCase();
   const conversationId = input.conversation_id ?? crypto.randomUUID();
   const actions: AgentAction[] = [];
-  let assistantMessage = 'I can help with service status, restarts, logs, and snapshots.';
+  let assistantMessage = 'I can help with service status, restarts, logs, snapshots, verification, and secret rotation.';
 
   if (lower.includes('restart')) {
     const service = firstMatch(lower, ['nginx', 'apache2', 'httpd', 'mysql', 'mariadb', 'redis'], 'nginx');
@@ -81,14 +81,54 @@ export function planAgentResponse(input: ChatRequest): ChatResponse {
         'medium',
         true,
         {
-          site_path: '/var/www',
-          output_path: '/var/backups/site-snapshot.tgz',
+          site: input.site_id,
+          site_path: `/var/www/${input.site_id}`,
+          output_dir: '/var/backups/ai-webadmin',
         },
       ),
     );
     assistantMessage = 'I prepared a snapshot action. Confirm before live execution.';
+  } else if (lower.includes('verify')) {
+    actions.push(
+      createAction(
+        'verify_site_upgrade',
+        'Run lightweight site verification checks.',
+        'medium',
+        false,
+        {
+          site: input.site_id,
+          site_path: `/var/www/${input.site_id}`,
+          expect_files_csv: `/var/www/${input.site_id}/index.php`,
+        },
+      ),
+    );
+    assistantMessage = 'I prepared a verification action for the site path.';
+  } else if (lower.includes('rotate') && lower.includes('secret')) {
+    actions.push(
+      createAction(
+        'rotate_secret',
+        'Rotate a named runtime secret.',
+        'high',
+        true,
+        {
+          name: 'API_TOKEN',
+          write_env_file: '/run/ai-vps-control-panel/runtime.env',
+          prefix: 'tok_',
+          length: 40,
+        },
+      ),
+    );
+    assistantMessage = 'I prepared a secret rotation action. Confirm before live execution.';
   } else {
-    actions.push(createAction('noop', 'No matching operation. Ask for status, logs, restart, or snapshot.', 'low', false, {}));
+    actions.push(
+      createAction(
+        'noop',
+        'No matching operation. Ask for status, logs, restart, snapshot, verify, or rotate secret.',
+        'low',
+        false,
+        {},
+      ),
+    );
   }
 
   return {

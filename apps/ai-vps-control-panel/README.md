@@ -14,7 +14,12 @@ Initial backend scaffold for a custom VPS control panel operated through a chat-
 - Dry-run-first execution mode for risky operations.
 - Persistent API-key/PAT management with hashed-at-rest secrets, audit trails, revoke/rotate endpoints, and auto-rotation support.
 - Supports `switch_load_balancer_mode` action mapped to `/root/watchdog-heartbeat.sh` with strict args validation.
+- Supports `run_site_snapshot` action mapped to `/root/snapshot-site.sh` or `AI_VPS_SNAPSHOT_SCRIPT_PATH`.
+- Supports `plan_site_upgrade` action mapped to `/root/plan-upgrade.sh` or `AI_VPS_PLAN_UPGRADE_SCRIPT_PATH`.
+- Supports `verify_site_upgrade` action mapped to `/root/verify-upgrade.sh` or `AI_VPS_VERIFY_UPGRADE_SCRIPT_PATH`.
+- Supports `rollback_site_upgrade` action mapped to `/root/rollback-upgrade.sh` or `AI_VPS_ROLLBACK_UPGRADE_SCRIPT_PATH`.
 - Supports `run_security_scan` action mapped to `/root/run-security-scan.sh` or `AI_VPS_RUN_SECURITY_SCAN_SCRIPT_PATH`.
+- Supports `rotate_secret` action mapped to `/root/rotate-secrets.sh` or `AI_VPS_ROTATE_SECRETS_SCRIPT_PATH`.
 - Fleet mode: multi-site risk dashboard, policy templates, and bulk policy apply across sites.
 - Billing mode: per-site monthly sandbox subscription state with sync to worker enforcement.
 
@@ -48,6 +53,7 @@ Initial backend scaffold for a custom VPS control panel operated through a chat-
 - `POST /api/fleet/policies`
 - `POST /api/fleet/policies/:id/apply`
 - `POST /api/chat/message`
+- `POST /api/actions/queue`
 - `POST /api/agent/execute`
 
 ## Authentication / RBAC

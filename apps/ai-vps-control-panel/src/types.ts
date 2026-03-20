@@ -9,7 +9,11 @@ export type AgentActionType =
   | 'restart_service'
   | 'tail_service_logs'
   | 'run_site_snapshot'
+  | 'plan_site_upgrade'
+  | 'verify_site_upgrade'
+  | 'rollback_site_upgrade'
   | 'run_security_scan'
+  | 'rotate_secret'
   | 'switch_load_balancer_mode'
   | 'noop';
 

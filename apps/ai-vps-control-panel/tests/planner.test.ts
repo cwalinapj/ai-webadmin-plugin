@@ -22,4 +22,25 @@ describe('agent planner', () => {
     expect(response.actions[0]?.type).toBe('check_service_status');
     expect(response.actions[0]?.args.service).toBe('mysql');
   });
+
+  it('creates snapshot action from chat prompt with host-side args', () => {
+    const response = planAgentResponse({
+      site_id: 'site-1',
+      message: 'take a snapshot before changes',
+    });
+
+    expect(response.actions[0]?.type).toBe('run_site_snapshot');
+    expect(response.actions[0]?.args.site).toBe('site-1');
+    expect(response.actions[0]?.args.site_path).toBe('/var/www/site-1');
+  });
+
+  it('creates rotate secret action from chat prompt', () => {
+    const response = planAgentResponse({
+      site_id: 'site-1',
+      message: 'rotate secret for the runtime',
+    });
+
+    expect(response.actions[0]?.type).toBe('rotate_secret');
+    expect(response.actions[0]?.requires_confirmation).toBe(true);
+  });
 });
